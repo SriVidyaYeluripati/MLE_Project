@@ -1,0 +1,15 @@
+# Extra libraries required by our agents, beyond the tournament base image.
+# Listed for the MaMPF pre-run test (task sheet, section 8).
+#
+# model_linearQ  (candidate B, linear Q-learning) needs only numpy, which the
+# base environment already provides. It is pinned here for reproducibility.
+# model_a        (candidate C, fitted Q-iteration) needs scikit-learn.
+# my_agent       (candidate D, DQN) needs torch.
+
+numpy>=1.24
+scikit-learn>=1.3
+torch>=2.0
+
+# Development only - not needed to run a submitted agent:
+# pygame  (GUI)
+# tqdm    (progress bars)

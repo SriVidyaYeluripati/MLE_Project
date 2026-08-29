@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Framework output
+logs/
+replays/
+results/*
+!results/.gitkeep
+screenshots/*
+!screenshots/.gitkeep
+
+# Packaged submissions - rebuild these from source, never track them
+*.zip
+
+# Training artefacts that are not the submitted model.
+# Final weights for a submitted agent MUST stay tracked - whitelisted below.
+agent_code/*/checkpoints/
+agent_code/*/*.npz
+agent_code/*/*.pt
+!agent_code/model_linearQ/weights.npz
+!agent_code/my_agent/my-saved-model.pt
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
