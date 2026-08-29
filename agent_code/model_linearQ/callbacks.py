@@ -8,9 +8,11 @@ import os
 import numpy as np
 
 try:
-    from .features import ACTIONS, N_FEATURES, BIAS, feature_matrix, context
+    from .features import (ACTIONS, N_FEATURES, BIAS, NO_ESCAPE,
+                           feature_matrix, context)
 except ImportError:
-    from features import ACTIONS, N_FEATURES, BIAS, feature_matrix, context
+    from features import (ACTIONS, N_FEATURES, BIAS, NO_ESCAPE,
+                          feature_matrix, context)
 
 MODEL_FILE = 'weights.npz'          # relative to THIS file - never absolute
 
@@ -18,6 +20,13 @@ OPTIMISTIC_INIT = 0.5               # untried actions look attractive (ch. 4)
 TAU_TRAIN = 0.60                    # softmax temperature while training
 TAU_PLAY = 0.10                     # near-greedy when it counts
 TIE_EPS = 1e-9                      # values this close count as tied
+
+# Exploration is NOT uniform over the six actions: a random BOMB can end the
+# episode, and an episode that ends early stops producing data (ch. 4.2).
+BOMB_EXPLORE = 0.25                 # BOMB is sampled at a quarter of its softmax share
+MASK_FATAL_ROUNDS = 0               # curriculum: mask provably-fatal actions for the
+                                    # first N training rounds, then learn from real
+                                    # deaths. 0 = off. Ablate this.
 
 
 def model_path():
@@ -72,6 +81,17 @@ def act(self, game_state: dict) -> str:
     self.last_phi, self.last_q, self.last_ctx = phi, q, ctx
 
     p = action_probabilities(q, self.tau)
+
+    if getattr(self, 'train', False):
+        # damp exploratory self-destruction; the greedy choice is untouched
+        p = p.copy()
+        p[ACTIONS.index('BOMB')] *= BOMB_EXPLORE
+        if game_state['round'] <= MASK_FATAL_ROUNDS:
+            survivable = phi[:, NO_ESCAPE] < 0.5
+            if survivable.any():
+                p *= survivable
+        p /= p.sum()
+
     idx = self.rng.choice(len(ACTIONS), p=p)
     self.logger.debug(f'q={np.round(q, 3)} -> {ACTIONS[idx]}')
     return ACTIONS[idx]

@@ -29,7 +29,8 @@ except ImportError:
 GAMMA = 0.95        # six-step credit horizon; 1/(1-gamma) = 20
 LAMBDA = 0.80       # credit assignment AND one leg of the deadly triad
 ALPHA = 0.01        # normalised by ||phi||^2 below
-USE_SHAPING = True  # tier 2; flip to False for the ablation row
+USE_SHAPING = False # see the note below: with LEVEL features present, the state
+                    # potential duplicates them and distorts their weights.
 AVG_BETA = 0.001    # iterate averaging -> the weights we actually ship
 REPORT_EVERY = 100  # rounds
 
@@ -37,9 +38,16 @@ REPORT_EVERY = 100  # rounds
 # Tier 1 - the true objective, scaled into [-1, 1] (see ch. 2 and ch. 5).
 REWARDS_TRUE = {
     e.COIN_COLLECTED: 0.2,
+    e.KILLED_OPPONENT: 1.0,
 }
-# Tier 3 - declared unsafe shaping. Justify and ablate each one.
+# Tier 3 - declared unsafe shaping. Three items, each justified and ablatable.
+#   KILLED_SELF     the game has NO direct death penalty - this is our invention,
+#                   standing in for the lost remainder of the episode (ch. 5.3)
+#   CRATE_DESTROYED the crate -> coin chain is too long to learn from coins alone
+#   INVALID_ACTION  a wasted step
 REWARDS_EXTRA = {
+    e.KILLED_SELF: -1.0,
+    e.CRATE_DESTROYED: 0.02,
     e.INVALID_ACTION: -0.05,
 }
 
@@ -161,6 +169,9 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: List[str
             'round': self.round,
             'score': self.stats['score'] / n,
             'coins': self.stats[e.COIN_COLLECTED] / n,
+            'crates': self.stats[e.CRATE_DESTROYED] / n,
+            'bombs': self.stats[e.BOMB_DROPPED] / n,
+            'suicides': self.stats[e.KILLED_SELF] / n,
             'survived': self.stats[e.SURVIVED_ROUND] / n,
             'invalid': self.stats[e.INVALID_ACTION] / n,
             'steps': self.stats['steps'] / n,
@@ -171,9 +182,10 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: List[str
         self.history.append(row)
         self.logger.info(str(row))
         print(f"[{self.round:5d}]  score {row['score']:5.2f}  coins {row['coins']:5.2f}"
-              f"  invalid {row['invalid']:5.2f}  |w| {row['w_norm']:5.2f}"
-              f"  max|Q| {row['max_abs_q']:5.2f}  |d| {row['td_abs']:.4f}")
-        print('          ' + describe(self.w))
+              f"  crates {row['crates']:5.2f}  bombs {row['bombs']:5.2f}"
+              f"  suicide {row['suicides']:4.2f}  surv {row['survived']:4.2f}"
+              f"  |w| {row['w_norm']:5.2f}  max|Q| {row['max_abs_q']:5.2f}")
+        print('          ' + describe(self.w, top=8))
         self.stats = defaultdict(float)
         self.q_max_seen = 0.0
         save(self)
