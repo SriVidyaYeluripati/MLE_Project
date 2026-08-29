@@ -51,6 +51,7 @@ def setup_training(self):
     self.stats = defaultdict(float)
     self.history = []
     self.q_max_seen = 0.0
+    self.processed_step = -1     # guards against the double delivery, see below
     self.logger.info(f'training: gamma={GAMMA} lambda={LAMBDA} alpha={ALPHA} '
                      f'shaping={USE_SHAPING}')
 
@@ -109,15 +110,29 @@ def game_events_occurred(self, old_game_state: dict, self_action: str,
 
     for ev in events:
         self.stats[ev] += 1
+    self.processed_step = old_game_state['step']
 
 
 def end_of_round(self, last_game_state: dict, last_action: str, events: List[str]):
     """
-    The step in which our agent DIES arrives only here - game_events_occurred is
-    not called for the last step.  Learning placed only there would never see
-    our own deaths.
+    Two different situations arrive here, and treating them alike corrupts the
+    single most important transition in the game.
+
+    * We DIED.  environment.send_game_events() skips dead agents, so this is the
+      only delivery of that step.  It is a true terminal: no bootstrap.
+    * We SURVIVED to the step limit.  send_game_events() already delivered this
+      exact step to game_events_occurred, and end_round() re-sends the same
+      (unreset) event list with SURVIVED_ROUND appended.  Updating again would
+      apply the same transition twice and double-count its reward.  It is also
+      not a terminal - the episode was truncated by the clock - so the bootstrap
+      already applied in game_events_occurred is the correct treatment.
+
+    self.processed_step tells the two apart.
     """
-    if last_action in ACTIONS:
+    already_seen = (last_game_state is not None
+                    and last_game_state['step'] == self.processed_step)
+
+    if not already_seen and last_action in ACTIONS:
         a = ACTIONS.index(last_action)
         phi_sa = (self.last_phi[a] if getattr(self, 'last_phi', None) is not None
                   else features(last_game_state, last_action))
@@ -126,13 +141,18 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: List[str
         update(self, phi_sa, None, r, terminal=True)
 
     for ev in events:
-        self.stats[ev] += 1
+        if not already_seen or ev == e.SURVIVED_ROUND:   # the only genuinely new one
+            self.stats[ev] += 1
 
     self.trace[:] = 0.0
     self.last_phi = self.last_q = self.last_ctx = None
+    self.processed_step = -1
     self.round += 1
 
-    self.stats['score'] += last_game_state['self'][1]
+    # last_game_state predates the final step's collection, so count the score
+    # from events instead of reading a stale field
+    self.stats['score'] = (1.0 * self.stats[e.COIN_COLLECTED]
+                           + 5.0 * self.stats[e.KILLED_OPPONENT])
     self.stats['steps'] += last_game_state['step']
 
     if self.round % REPORT_EVERY == 0:
@@ -141,6 +161,7 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: List[str
             'round': self.round,
             'score': self.stats['score'] / n,
             'coins': self.stats[e.COIN_COLLECTED] / n,
+            'survived': self.stats[e.SURVIVED_ROUND] / n,
             'invalid': self.stats[e.INVALID_ACTION] / n,
             'steps': self.stats['steps'] / n,
             'td_abs': self.stats['td_abs'] / max(self.stats['updates'], 1),
