@@ -17,11 +17,11 @@ import numpy as np
 import events as e
 
 try:
-    from .callbacks import action_probabilities, model_path
+    from .callbacks import action_probabilities, legal_mask, model_path
     from .features import (ACTIONS, N_FEATURES, FEATURE_NAMES, feature_matrix,
                            features, context, potential, describe)
 except ImportError:
-    from callbacks import action_probabilities, model_path
+    from callbacks import action_probabilities, legal_mask, model_path
     from features import (ACTIONS, N_FEATURES, FEATURE_NAMES, feature_matrix,
                           features, context, potential, describe)
 
@@ -76,14 +76,17 @@ def reward_from(self, events, old_state, new_state, old_ctx=None):
     return r
 
 
-def update(self, phi_sa, q_next, r, terminal):
+def update(self, phi_sa, q_next, r, terminal, legal_next=None):
     """One Expected SARSA(lambda) step."""
     q_sa = float(phi_sa @ self.w)
 
     if terminal:
         target = r                                   # NO bootstrap past death
     else:
-        p = action_probabilities(q_next, self.tau)
+        # Expected SARSA is ON-policy: the expectation must be taken under the
+        # policy act() actually follows, mask included, or the target describes
+        # a policy we never play.
+        p = action_probabilities(q_next, self.tau, legal_next)
         target = r + GAMMA * float(p @ q_next)
 
     delta = target - q_sa
@@ -112,10 +115,12 @@ def game_events_occurred(self, old_game_state: dict, self_action: str,
     old_ctx = getattr(self, 'last_ctx', None)
     phi_sa = (self.last_phi[a] if getattr(self, 'last_phi', None) is not None
               else features(old_game_state, self_action))
-    q_next = feature_matrix(new_game_state) @ self.w
+    phi_next = feature_matrix(new_game_state)
+    q_next = phi_next @ self.w
 
     r = reward_from(self, events, old_game_state, new_game_state, old_ctx)
-    update(self, phi_sa, q_next, r, terminal=False)
+    update(self, phi_sa, q_next, r, terminal=False,
+           legal_next=legal_mask(phi_next))
 
     for ev in events:
         self.stats[ev] += 1
@@ -198,4 +203,4 @@ def save(self):
              w_last=self.w,
              feature_names=np.array(FEATURE_NAMES),
              actions=np.array(ACTIONS),
-             hyper=np.array([GAMMA, LAMBDA, ALPHA, float(USE_SHAPING)]))
+                            hyper=np.array([GAMMA, LAMBDA, ALPHA, float(USE_SHAPING)]))
