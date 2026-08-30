@@ -47,6 +47,7 @@ REWARDS_TRUE = {
 #   INVALID_ACTION  a wasted step
 REWARDS_EXTRA = {
     e.KILLED_SELF: -1.0,
+    e.GOT_KILLED: -1.0,
     e.CRATE_DESTROYED: 0.02,
     e.INVALID_ACTION: -0.05,
 }

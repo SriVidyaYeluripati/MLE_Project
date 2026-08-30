@@ -56,6 +56,14 @@ FEATURE_NAMES = [
     'x_bomb_crates2',  # 25  bombing AND it clears two or more crates
     # --- an offset column, constant across actions (see below)
     'phi_state',       # 26  Phi(s) itself
+    # --- stage 3: opponents.  Note what is NOT here: the distance LEVEL.
+    # Stage 2 showed that level features duplicate the potential and end up
+    # absorbing -Phi(s), so opponent distance lives in potential() instead and
+    # only the delta and the situation are features.
+    'opp_delta',       # 27  -1 closer to the nearest opponent, 0 same, +1 further
+    'opp_in_blast',    # 28  a bomb here would cover an opponent's tile
+    'x_bomb_opp',      # 29  bombing AND it covers an opponent -> the 5-point play
+    'no_opp',          # 30  no opponent reachable
 ]
 N_FEATURES = len(FEATURE_NAMES)
 (BIAS, IS_WAIT, IS_INVALID, D_COIN, COIN_DELTA, NO_COIN,
@@ -63,7 +71,8 @@ N_FEATURES = len(FEATURE_NAMES)
  CRATES_1, CRATES_2, CRATES_3P,
  DANGER_0, DANGER_1, DANGER_2, DANGER_3, DANGER_4,
  D_SAFETY, SAFETY_DELTA, NO_ESCAPE, EXITS, DEAD_END,
- X_DANGER_SAFETY, X_BOMB_NOESCAPE, X_BOMB_CRATES2, PHI_STATE) = range(N_FEATURES)
+ X_DANGER_SAFETY, X_BOMB_NOESCAPE, X_BOMB_CRATES2, PHI_STATE,
+ OPP_DELTA, OPP_IN_BLAST, X_BOMB_OPP, NO_OPP) = range(N_FEATURES)
 
 GAMMA_FEAT = 0.9
 UNREACHABLE = np.iinfo(np.int32).max
@@ -212,6 +221,12 @@ def _context_uncached(game_state):
     ctx['d_to_coin'] = multi_source_bfs(game_state['coins'], ctx['blocked'])
     ctx['d_coin_here'] = int(ctx['d_to_coin'][pos])
 
+    others = [o[3] for o in game_state['others']]
+    free_of_agents = game_state['field'] != 0          # walls and crates only
+    ctx['d_to_opp'] = multi_source_bfs(others, free_of_agents) if others else None
+    ctx['d_opp_here'] = (int(ctx['d_to_opp'][pos]) if others else UNREACHABLE)
+    ctx['others'] = others
+
     ctx['bomb_value'] = bomb_values(game_state['field'])
     worth_bombing = list(zip(*np.nonzero(ctx['bomb_value'] >= 1)))
     ctx['d_to_crate'] = multi_source_bfs(worth_bombing, ctx['blocked'])
@@ -307,10 +322,20 @@ def features(game_state, action, ctx=None):
     phi[EXITS] = exits / 4.0
     phi[DEAD_END] = float(exits <= 1)
 
+    # ---- opponents
+    if ctx['d_to_opp'] is None or ctx['d_opp_here'] == UNREACHABLE:
+        phi[NO_OPP] = 1.0
+    else:
+        phi[OPP_DELTA] = _sign(int(ctx['d_to_opp'][dest]), ctx['d_opp_here'])
+        if is_bomb and ctx['bombs_left']:
+            hit = set(blast_coords(ctx['field'], pos[0], pos[1]))
+            phi[OPP_IN_BLAST] = float(any(o in hit for o in ctx['others']))
+
     # ---- conjunctions
     phi[X_DANGER_SAFETY] = float(ctx['in_danger']) * phi[SAFETY_DELTA]
     phi[X_BOMB_NOESCAPE] = phi[IS_BOMB] * phi[NO_ESCAPE]
     phi[X_BOMB_CRATES2] = phi[IS_BOMB] * (phi[CRATES_2] + phi[CRATES_3P])
+    phi[X_BOMB_OPP] = phi[IS_BOMB] * phi[OPP_IN_BLAST]
 
     # ---- offset column
     # Potential-based shaping is equivalent to initialising the value function
@@ -347,6 +372,8 @@ def potential(game_state, ctx=None):
         phi += 0.30 * _decay(ctx['d_coin_here'])        # then chase coins
     elif ctx['d_crate_here'] != UNREACHABLE:
         phi += 0.15 * _decay(ctx['d_crate_here'])       # otherwise open crates
+    if ctx['bombs_left'] and ctx['d_opp_here'] != UNREACHABLE:
+        phi += 0.10 * _decay(ctx['d_opp_here'])         # hunt only when armed
     return phi
 
 
