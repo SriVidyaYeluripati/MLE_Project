@@ -18,7 +18,7 @@ MODEL_FILE = 'weights.npz'          # relative to THIS file - never absolute
 
 OPTIMISTIC_INIT = 0.5               # untried actions look attractive (ch. 4)
 TAU_TRAIN = 0.25                    # softmax temperature while training
-TAU_PLAY = 0.10                     # near-greedy when it counts
+TAU_PLAY = 0.0                      # near-greedy when it counts
 TIE_EPS = 1e-9                      # values this close count as tied
 
 # Exploration is NOT uniform over the six actions: a random BOMB can end the
