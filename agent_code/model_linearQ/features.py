@@ -271,14 +271,14 @@ def features(game_state, action, ctx=None):
         phi[NO_COIN] = 1.0
     else:
         d_after = int(ctx['d_to_coin'][dest])
-        phi[D_COIN] = _decay(d_after)
+        # phi[D_COIN] = _decay(d_after)   # level dropped: duplicates Phi(s)
         phi[COIN_DELTA] = _sign(d_after, d_here)
 
     # ---- crates
     dc_here = ctx['d_crate_here']
     if dc_here != UNREACHABLE:
         dc_after = int(ctx['d_to_crate'][dest])
-        phi[D_CRATE] = _decay(dc_after)
+        # phi[D_CRATE] = _decay(dc_after) # level dropped: duplicates Phi(s)
         phi[CRATE_DELTA] = _sign(dc_after, dc_here)
 
     if is_bomb and ctx['bombs_left']:
@@ -298,7 +298,7 @@ def features(game_state, action, ctx=None):
             phi[DANGER_0 + first] = 1.0
 
     ds_after = int(view['d_safe'][dest])
-    phi[D_SAFETY] = _decay(ds_after)
+    # phi[D_SAFETY] = _decay(ds_after)  # level dropped: duplicates Phi(s)
     phi[SAFETY_DELTA] = _sign(ds_after, ctx['d_safe_here'])
     phi[NO_ESCAPE] = float(not view['surv'][0][dest])
 

@@ -29,7 +29,7 @@ except ImportError:
 GAMMA = 0.95        # six-step credit horizon; 1/(1-gamma) = 20
 LAMBDA = 0.80       # credit assignment AND one leg of the deadly triad
 ALPHA = 0.01        # normalised by ||phi||^2 below
-USE_SHAPING = False # see the note below: with LEVEL features present, the state
+USE_SHAPING = True  # see the note below: with LEVEL features present, the state
                     # potential duplicates them and distorts their weights.
 AVG_BETA = 0.001    # iterate averaging -> the weights we actually ship
 REPORT_EVERY = 100  # rounds
