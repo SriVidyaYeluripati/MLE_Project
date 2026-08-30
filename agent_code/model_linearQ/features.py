@@ -64,6 +64,12 @@ FEATURE_NAMES = [
     'opp_in_blast',    # 28  a bomb here would cover an opponent's tile
     'x_bomb_opp',      # 29  bombing AND it covers an opponent -> the 5-point play
     'no_opp',          # 30  no opponent reachable
+    # --- stage 4: the kill play.  opp_in_blast only says the blast COVERS them;
+    # they still have four steps to walk out of it.  opp_trapped asks the
+    # question that actually pays: after this bomb, does that opponent have any
+    # surviving continuation at all?  Same backward recursion as no_escape.
+    'opp_trapped',     # 31  a bomb here leaves an opponent with no escape
+    'x_bomb_trapped',  # 32  bombing AND it traps -> this is what a kill looks like
 ]
 N_FEATURES = len(FEATURE_NAMES)
 (BIAS, IS_WAIT, IS_INVALID, D_COIN, COIN_DELTA, NO_COIN,
@@ -72,7 +78,8 @@ N_FEATURES = len(FEATURE_NAMES)
  DANGER_0, DANGER_1, DANGER_2, DANGER_3, DANGER_4,
  D_SAFETY, SAFETY_DELTA, NO_ESCAPE, EXITS, DEAD_END,
  X_DANGER_SAFETY, X_BOMB_NOESCAPE, X_BOMB_CRATES2, PHI_STATE,
- OPP_DELTA, OPP_IN_BLAST, X_BOMB_OPP, NO_OPP) = range(N_FEATURES)
+ OPP_DELTA, OPP_IN_BLAST, X_BOMB_OPP, NO_OPP,
+ OPP_TRAPPED, X_BOMB_TRAPPED) = range(N_FEATURES)
 
 GAMMA_FEAT = 0.9
 UNREACHABLE = np.iinfo(np.int32).max
@@ -330,12 +337,15 @@ def features(game_state, action, ctx=None):
         if is_bomb and ctx['bombs_left']:
             hit = set(blast_coords(ctx['field'], pos[0], pos[1]))
             phi[OPP_IN_BLAST] = float(any(o in hit for o in ctx['others']))
+            surv = ctx['after_bomb']['surv'][0]
+            phi[OPP_TRAPPED] = float(any(o in hit and not surv[o] for o in ctx['others']))
 
     # ---- conjunctions
     phi[X_DANGER_SAFETY] = float(ctx['in_danger']) * phi[SAFETY_DELTA]
     phi[X_BOMB_NOESCAPE] = phi[IS_BOMB] * phi[NO_ESCAPE]
     phi[X_BOMB_CRATES2] = phi[IS_BOMB] * (phi[CRATES_2] + phi[CRATES_3P])
     phi[X_BOMB_OPP] = phi[IS_BOMB] * phi[OPP_IN_BLAST]
+    phi[X_BOMB_TRAPPED] = phi[IS_BOMB] * phi[OPP_TRAPPED]
 
     # ---- offset column
     # Potential-based shaping is equivalent to initialising the value function
@@ -373,7 +383,7 @@ def potential(game_state, ctx=None):
     elif ctx['d_crate_here'] != UNREACHABLE:
         phi += 0.15 * _decay(ctx['d_crate_here'])       # otherwise open crates
     if ctx['bombs_left'] and ctx['d_opp_here'] != UNREACHABLE:
-        phi += 0.10 * _decay(ctx['d_opp_here'])         # hunt only when armed
+        phi += 0.25 * _decay(ctx['d_opp_here'])         # hunt only when armed
     return phi
 
 
