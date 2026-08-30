@@ -170,7 +170,16 @@ def bomb_values(field, power=3):
 # --------------------------------------------------------------------------- #
 
 def _danger_view(game_state, extra_bomb=None):
-    """lethal / survivable / distance-to-safety, optionally with a hypothetical bomb."""
+    """
+    lethal / survivable / distance-to-safety, optionally with a hypothetical bomb.
+
+    Opponents are removed from `free`.  Without this, survivable_map assumes we
+    can walk THROUGH other agents, so no_escape reports an escape that a body in
+    the corridor has already closed.  Solo that never mattered; in a four-agent
+    game it is the difference between 0.02 and 0.68 self-kills per round.
+    Treating them as static walls is pessimistic - they move - but a bomb we
+    decline to drop is cheaper than a death.
+    """
     gs = game_state
     if extra_bomb is not None:
         gs = dict(game_state)
@@ -178,6 +187,8 @@ def _danger_view(game_state, extra_bomb=None):
 
     lethal = danger_map(gs)
     free = gs['field'] == 0
+    for _, _, _, (ox, oy) in gs['others']:
+        free[ox, oy] = False
     surv = survivable_map(lethal, free)
     never_lethal = free & ~lethal.any(axis=0)
     d_safe = multi_source_bfs(list(zip(*np.nonzero(never_lethal))), ~free)
