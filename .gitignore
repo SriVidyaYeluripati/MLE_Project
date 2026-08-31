@@ -33,3 +33,7 @@ agent_code/*/*.pt
 .vscode/
 .idea/
 .DS_Store
+
+# ablation results are experimental data, not build output - keep them
+!results/ablation/
+!results/ablation/**

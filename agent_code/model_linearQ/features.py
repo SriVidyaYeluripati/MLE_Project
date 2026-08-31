@@ -83,6 +83,47 @@ N_FEATURES = len(FEATURE_NAMES)
 
 GAMMA_FEAT = 0.9
 UNREACHABLE = np.iinfo(np.int32).max
+# --------------------------------------------------------------------------- #
+# ablation switch (step 5)
+#
+# Zeroing a column is exactly equivalent to deleting the feature: it contributes
+# nothing to any Q-value and its weight receives no gradient.  Doing it this way
+# rather than by editing the list keeps every index stable across every run, so
+# the ablation weight vectors stay directly comparable to the full model's.
+#
+#   LQ_ABLATE=danger,conj python main.py ...
+# --------------------------------------------------------------------------- #
+import os as _os
+
+ABLATION_GROUPS = {
+    'coins':    ['d_coin', 'coin_delta', 'no_coin'],
+    'crates':   ['d_crate', 'crate_delta',
+                 'crates_hit_1', 'crates_hit_2', 'crates_hit_3p'],
+    'danger':   ['danger_0', 'danger_1', 'danger_2', 'danger_3', 'danger_4'],
+    'escape':   ['d_safety', 'safety_delta', 'no_escape'],
+    'geometry': ['exits', 'dead_end'],
+    'conj':     ['x_danger_safety', 'x_bomb_noescape', 'x_bomb_crates2',
+                 'x_bomb_opp', 'x_bomb_trapped'],
+    'opp':      ['opp_delta', 'opp_in_blast', 'no_opp',
+                 'opp_trapped', 'x_bomb_opp', 'x_bomb_trapped'],
+    'trapped':  ['opp_trapped', 'x_bomb_trapped'],
+    'phi':      ['phi_state'],
+}
+
+
+def _build_ablation_mask():
+    names = [s.strip() for s in _os.environ.get('LQ_ABLATE', '').split(',') if s.strip()]
+    mask = np.ones(N_FEATURES)
+    for n in names:
+        if n not in ABLATION_GROUPS:
+            raise ValueError(f'unknown ablation group {n!r}; '
+                             f'known: {sorted(ABLATION_GROUPS)}')
+        for f in ABLATION_GROUPS[n]:
+            mask[FEATURE_NAMES.index(f)] = 0.0
+    return mask, names
+
+
+ABLATION_MASK, ABLATED = _build_ablation_mask()
 BOMB_TIMER = 4          # what a bomb dropped NOW looks like to the danger map
 NEIGHBOURS = ((0, -1), (1, 0), (0, 1), (-1, 0))
 
@@ -368,6 +409,8 @@ def features(game_state, action, ctx=None):
     # feature absorbs the offset and leaves the others free to do their job.
     phi[PHI_STATE] = potential(game_state, ctx)
 
+    if ABLATED:
+        phi *= ABLATION_MASK
     return phi
 
 

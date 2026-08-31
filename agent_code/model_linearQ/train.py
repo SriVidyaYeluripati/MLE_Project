@@ -27,9 +27,12 @@ except ImportError:
 
 # ---------------------------------------------------------------- hyperparameters
 GAMMA = 0.95        # six-step credit horizon; 1/(1-gamma) = 20
-LAMBDA = 0.80       # credit assignment AND one leg of the deadly triad
+LAMBDA = float(os.environ.get('LQ_LAMBDA', 0.80))
+                    # credit assignment AND one leg of the deadly triad. Ablate
+                    # to 0.0 for one-step Expected SARSA.
 ALPHA = 0.01        # normalised by ||phi||^2 below
-USE_SHAPING = True  # see the note below: with LEVEL features present, the state
+USE_SHAPING = os.environ.get('LQ_SHAPING', '1') != '0'
+                    # see the note below: with LEVEL features present, the state
                     # potential duplicates them and distorts their weights.
 AVG_BETA = 0.001    # iterate averaging -> the weights we actually ship
 REPORT_EVERY = 100  # rounds
@@ -203,4 +206,4 @@ def save(self):
              w_last=self.w,
              feature_names=np.array(FEATURE_NAMES),
              actions=np.array(ACTIONS),
-                            hyper=np.array([GAMMA, LAMBDA, ALPHA, float(USE_SHAPING)]))
+             hyper=np.array([GAMMA, LAMBDA, ALPHA, float(USE_SHAPING)]))

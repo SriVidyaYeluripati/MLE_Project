@@ -14,7 +14,9 @@ except ImportError:
     from features import (ACTIONS, N_FEATURES, BIAS, NO_ESCAPE, IS_INVALID,
                           feature_matrix, context)
 
-MODEL_FILE = 'weights.npz'          # relative to THIS file - never absolute
+# LQ_WEIGHTS lets an ablation run write its own file instead of clobbering the
+# shipped weights.  Relative to THIS file - never absolute.
+MODEL_FILE = os.environ.get('LQ_WEIGHTS', 'weights.npz')
 
 OPTIMISTIC_INIT = 0.5               # untried actions look attractive (ch. 4)
 TAU_TRAIN = 0.25                    # softmax temperature while training
@@ -38,7 +40,7 @@ MASK_FATAL_ROUNDS = 0               # curriculum: mask provably-fatal actions fo
 # count barely moved when we went greedy: those actions were never exploration.
 # Masking removes the whole failure mode instead of hoping the weights order
 # themselves correctly (Huang & Ontanon 2022, invalid action masking).
-MASK_INVALID = True                 # ablate this.
+MASK_INVALID = os.environ.get('LQ_MASK_INVALID', '1') != '0'    # ablate this.
 
 
 def model_path():
