@@ -9,11 +9,13 @@ FIELDS = ['score', 'margin', 'coins', 'kills', 'crates', 'suic', 'inval', 'alive
 def one(path):
     d = json.load(open(path))['by_agent']
     me = next(k for k in d if 'linearQ' in k)
-    r = d[me]; n = r['rounds']
-    rb = max(v['score'] / v['rounds'] for k, v in d.items() if 'rule_based' in k)
-    return {'score': r['score']/n, 'margin': r['score']/n - rb,
-            'coins': r['coins']/n, 'kills': r['kills']/n, 'crates': r['crates']/n,
-            'suic': r['suicides']/n, 'inval': r['invalid']/n, 'alive': r['steps']/n}
+    r = d[me]; n = r.get('rounds', 1)
+    g = lambda k: r.get(k, 0) / n          # absent key = the event never happened
+    rb = max(v.get('score', 0) / v.get('rounds', 1)
+             for k, v in d.items() if 'rule_based' in k)
+    return {'score': g('score'), 'margin': g('score') - rb,
+            'coins': g('coins'), 'kills': g('kills'), 'crates': g('crates'),
+            'suic': g('suicides'), 'inval': g('invalid'), 'alive': g('steps')}
 
 runs = {}
 for p in sorted(glob.glob('results/ablation/*.json')):
