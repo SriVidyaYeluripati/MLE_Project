@@ -37,3 +37,4 @@ agent_code/*/*.pt
 # ablation results are experimental data, not build output - keep them
 !results/ablation/
 !results/ablation/**
+!results/**
