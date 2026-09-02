@@ -42,3 +42,7 @@ agent_code/*/*.pt
 !results/**
 
 !results/**
+
+__pycache__/
+*.pyc
+agent_code/*/logs/
