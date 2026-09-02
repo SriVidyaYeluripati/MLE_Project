@@ -53,7 +53,7 @@ def _permute(features, action_idx, rot, mirror):
             block = block[[0, 3, 2, 1]]             # mirror swaps R and L
         f[s:s + 4] = block
     if action_idx < 4:                              # a move action rotates too
-        a = (action_idx - rot) % 4
+        a = (action_idx + rot) % 4
         if mirror:
             a = [0, 3, 2, 1][a]
     else:
