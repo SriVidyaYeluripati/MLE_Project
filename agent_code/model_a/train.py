@@ -65,6 +65,7 @@ def setup_training(self):
     self.buffer = deque(maxlen=BUFFER_SIZE)
     self.round_count = 0
     self.epsilon = EPS_START
+    self.processed_step = -1     # guards the double delivery, see end_of_round
     self.logger.info(f"Model A training: {N_FEATURES} features, {REGRESSOR}, "
                      f"symmetry={USE_SYMMETRY}.")
 
@@ -87,11 +88,33 @@ def game_events_occurred(self, old_game_state, self_action,
                          new_game_state, events):
     _record(self, old_game_state, self_action,
             new_game_state, reward_from_events(self, events))
+    if old_game_state is not None:
+        self.processed_step = old_game_state['step']
 
 
 def end_of_round(self, last_game_state, last_action, events):
-    _record(self, last_game_state, last_action,
-            None, reward_from_events(self, events))
+    """
+    Two different situations arrive here and they need opposite treatment.
+
+    * We DIED.  environment.send_game_events() skips dead agents, so this is
+      the only delivery of that step.  A true terminal: no bootstrap, which is
+      what passing new_state=None below expresses.
+    * We SURVIVED to the step limit.  send_game_events() already handed this
+      exact step to game_events_occurred, and end_round() re-sends the same
+      (never reset) event list with SURVIVED_ROUND appended.  Recording again
+      would store the transition twice - eight times over, with symmetry
+      augmentation - and double-count its reward.  It would also label a
+      TRUNCATION as a terminal, teaching the agent that reaching the clock is
+      worth only the last reward with no continuation value.
+
+    self.processed_step tells them apart.
+    """
+    already_seen = (last_game_state is not None
+                    and last_game_state['step'] == getattr(self, 'processed_step', -1))
+    if not already_seen:
+        _record(self, last_game_state, last_action,
+                None, reward_from_events(self, events))
+    self.processed_step = -1
 
     self.round_count += 1
     frac = min(1.0, self.round_count / EPS_DECAY_ROUNDS)
@@ -117,6 +140,10 @@ def _refit(self):
     nonterminal = np.array([s is not None for s in S2])
     if self.model is not None and nonterminal.any():
         X2 = np.array([s for s in S2 if s is not None])
+        # THIS predict is a batch of up to 100k rows, where parallelism pays.
+        # act()'s predict is a single row, where it costs 4.5x more than it
+        # saves.  Same regressors, opposite optimum - so switch per use.
+        _set_n_jobs(self.model, -1)
         qs = np.column_stack([reg.predict(X2) for reg in self.model])
         future[nonterminal] = qs.max(axis=1)
 
@@ -125,12 +152,31 @@ def _refit(self):
     new_model = []
     for a in range(len(ACTIONS)):
         mask = A == a
-        if mask.sum() < 10:                       # too little data this action
-            reg = _fresh_regressor().fit(np.zeros((1, N_FEATURES)), [0.0])
-        else:
+        if mask.sum() >= 10:
             reg = _fresh_regressor().fit(S[mask], Y[mask])
+        elif self.model is not None:
+            # KEEP what this action already learned.  Refitting it on a single
+            # zero row would throw the knowledge away and make Q(s, a) = 0
+            # everywhere - which is exactly what happens to BOMB once epsilon
+            # decays and the greedy policy stops choosing it.  That turns a
+            # temporary shortage of data into a permanent refusal to bomb.
+            reg = self.model[a]
+        else:
+            reg = _fresh_regressor().fit(np.zeros((1, N_FEATURES)), [0.0])
         new_model.append(reg)
+
+    # Fitting wants all cores; act() wants none.  Leaving these at n_jobs=-1
+    # costs 90 ms per act() instead of 20 ms, i.e. ~22 s per round once epsilon
+    # has decayed - hours across a training run, and it is the same setting
+    # that made evaluation take 36 s per round before it was fixed.
+    _set_n_jobs(new_model, 1)
     self.model = new_model
+
+
+def _set_n_jobs(model, n):
+    for reg in model:
+        if hasattr(reg, 'n_jobs'):
+            reg.n_jobs = n
 
 
 def _fresh_regressor():
@@ -148,8 +194,13 @@ def reward_from_events(self, events: List[str]) -> float:
         e.CRATE_DESTROYED:  0.3,
         e.COIN_FOUND:       0.2,
         e.INVALID_ACTION:  -1.0,
-        e.KILLED_SELF:     -5.0,
-        e.GOT_KILLED:      -5.0,
+        # The framework fires BOTH events on a suicide (environment.py adds
+        # KILLED_SELF, then GOT_KILLED to every agent hit), so the old table
+        # charged -10 for blowing yourself up against +0.3 per crate.  Bombing
+        # only broke even below ~5% death risk, which random exploration never
+        # reaches - so Q(BOMB) went negative early and never recovered.
+        e.KILLED_SELF:     -1.0,     # -1 + -4 = -5 total for a suicide
+        e.GOT_KILLED:      -4.0,
         e.WAITED:          -0.05,
     }
     total = sum(rewards.get(ev, 0.0) for ev in events)
