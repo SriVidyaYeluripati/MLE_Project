@@ -66,6 +66,20 @@ def setup(self):
 
     self.tau = TAU_TRAIN if getattr(self, 'train', False) else TAU_PLAY
 
+    # The ablation switches are environment variables, so a stale export would
+    # silently ship a crippled agent - LQ_ABLATE=escape costs -5.30 margin and
+    # changes nothing visible on screen.  One log line at startup makes any such
+    # accident findable afterwards instead of unexplained.
+    try:
+        from .features import ABLATED
+    except ImportError:
+        from features import ABLATED
+    self.logger.info(
+        f'config: tau={self.tau} mask_invalid={MASK_INVALID} '
+        f'weights={MODEL_FILE} ablated={ABLATED or "none"}')
+    if ABLATED:
+        self.logger.warning(f'FEATURES ABLATED: {ABLATED} - not the shipped agent')
+
 
 def legal_mask(phi):
     """Rows of a feature matrix whose action the framework will actually run."""
