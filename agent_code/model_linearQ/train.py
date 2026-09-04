@@ -200,7 +200,12 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: List[str
         print('          ' + describe(self.w, top=8))
         self.stats = defaultdict(float)
         self.q_max_seen = 0.0
-        save(self)
+
+    # Save EVERY round, not only on the reporting boundary.  self.round restarts
+    # at 0 on each main.py invocation, so any run shorter than REPORT_EVERY
+    # rounds never reached the old save() call and silently discarded everything
+    # it had learned.  The file is 4 KB; there is no reason to be thrifty.
+    save(self)
 
 
 def save(self):
