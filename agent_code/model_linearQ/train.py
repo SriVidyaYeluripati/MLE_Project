@@ -30,7 +30,10 @@ GAMMA = 0.95        # six-step credit horizon; 1/(1-gamma) = 20
 LAMBDA = float(os.environ.get('LQ_LAMBDA', 0.80))
                     # credit assignment AND one leg of the deadly triad. Ablate
                     # to 0.0 for one-step Expected SARSA.
-ALPHA = 0.01        # normalised by ||phi||^2 below
+ALPHA = float(os.environ.get('LQ_ALPHA', 0.01))
+                    # normalised by ||phi||^2 below. A CONSTANT step size cannot
+                    # track a non-stationary target - the documented cause of
+                    # finding 5. Decay it during any opponent phase.
 USE_SHAPING = os.environ.get('LQ_SHAPING', '1') != '0'
                     # see the note below: with LEVEL features present, the state
                     # potential duplicates them and distorts their weights.

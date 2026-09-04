@@ -16,7 +16,11 @@ except ImportError:
 
 # LQ_WEIGHTS lets an ablation run write its own file instead of clobbering the
 # shipped weights.  Relative to THIS file - never absolute.
-MODEL_FILE = os.environ.get('LQ_WEIGHTS', 'weights.npz')
+# A FROZEN snapshot of the learner, used only as a training opponent.
+# Deliberately ignores LQ_WEIGHTS: the learner sets that for its own file, and
+# the point of the pool is that this opponent does NOT move while the learner
+# does. Frozen opponents are what make each episode stationary.
+MODEL_FILE = 'frozen.npz'
 
 OPTIMISTIC_INIT = 0.5               # untried actions look attractive (ch. 4)
 TAU_TRAIN = 0.25                    # softmax temperature while training
