@@ -30,10 +30,11 @@ PLACEHOLDER_EVENT = "PLACEHOLDER"
 ESCAPED_DANGER = "ESCAPED_DANGER"
 ENTERED_DANGER = "ENTERED_DANGER"
 UNSAFE_BOMB = "UNSAFE_BOMB"
-WAITED_IN_DANGER = "WAITED_IN_DANGER"
-USEFUL_SAFE_BOMB = "USEFUL_SAFE_BOMB"
-CLOSER_TO_COIN = "CLOSER_TO_COIN"
-FARTHER_FROM_COIN = "FARTHER_FROM_COIN"
+
+MOVED_TOWARD_COIN = "MOVED_TOWARD_COIN"
+MOVED_AWAY_FROM_COIN = "MOVED_AWAY_FROM_COIN"
+NEW_POSITION = "NEW_POSITION"
+REPEATED_POSITION = "REPEATED_POSITION"
 
 device = torch.device(
     "cuda" if torch.cuda.is_available() else
@@ -57,6 +58,9 @@ def setup_training(self):
     # Example: Setup an array that will note transition tuples
     # (s, a, r, s')
 
+    self.visited_positions = set()
+    self.recent_positions = deque(maxlen=20)
+
     self.target_net = DQN(n_observations=N_OBSERVATIONS, n_actions=len(ACTIONS)).to(device)
 
     self.memory = Replay_memory(5000)
@@ -70,6 +74,8 @@ def setup_training(self):
     self.target_net.load_state_dict(
         self.policy_net.state_dict()
     )
+
+    self.target_net.eval()
 
 
 def optimize_model(self):
@@ -173,6 +179,10 @@ def game_events_occurred(self, old_game_state: dict, self_action: str, new_game_
     """
     self.logger.debug(f'Encountered game event(s) {", ".join(map(repr, events))} in step {new_game_state["step"]}')
 
+    # Idea: Add your own events to hand out rewards
+    # if ...:
+    #     events.append(PLACEHOLDER_EVENT)
+
     # state_to_features is defined in callbacks.py
 
     state = state_to_features(old_game_state)
@@ -195,6 +205,42 @@ def game_events_occurred(self, old_game_state: dict, self_action: str, new_game_
     old_x, old_y = old_game_state["self"][3]
     new_x, new_y = new_game_state["self"][3]
 
+    old_position = (old_x, old_y)
+    new_position = (new_x, new_y)
+
+    # reward exploration
+    if new_position not in self.visited_positions:
+        events.append(NEW_POSITION)
+        self.visited_positions.add(new_position)
+
+    # penalize repeated visited positions
+    if new_position in self.recent_positions:
+        events.append(REPEATED_POSITION)
+
+    self.recent_positions.append(new_position)
+
+    # reward movement toward the nearest visible coin
+    coins = old_game_state["coins"]
+    if coins:
+        nearest_coin = min(
+            coins, 
+            key=lambda coin: abs(coin[0] - old_x) + abs(coin[1] - old_y)
+        )
+
+        old_distance = (
+            abs(nearest_coin[0] - old_x) + abs(nearest_coin[1] - old_y)
+        )
+
+        new_distance = (
+            abs(nearest_coin[0] - new_x) + abs(nearest_coin[1] - new_y)
+        )
+
+        if new_distance < old_distance:
+            events.append(MOVED_TOWARD_COIN)
+        elif new_distance > old_distance:
+            events.append(MOVED_AWAY_FROM_COIN)
+
+
     old_danger = is_position_danger(
         old_field,
         old_explosion_map,
@@ -212,26 +258,11 @@ def game_events_occurred(self, old_game_state: dict, self_action: str, new_game_
     if old_danger and not new_danger:
         events.append(ESCAPED_DANGER)
 
-    if not old_danger and new_danger:
+    if (
+    not old_danger
+    and new_danger
+    and self_action != "BOMB"):
         events.append(ENTERED_DANGER)
-
-    if old_danger and self_action == "WAIT":
-        events.append(WAITED_IN_DANGER)
-
-    if old_game_state["coins"] and (old_x, old_y) != (new_x, new_y):
-        old_coin_distance = min(
-            abs(coin_x - old_x) + abs(coin_y - old_y)
-            for coin_x, coin_y in old_game_state["coins"]
-        )
-        new_coin_distance = min(
-            abs(coin_x - new_x) + abs(coin_y - new_y)
-            for coin_x, coin_y in old_game_state["coins"]
-        )
-
-        if new_coin_distance < old_coin_distance:
-            events.append(CLOSER_TO_COIN)
-        elif new_coin_distance > old_coin_distance:
-            events.append(FARTHER_FROM_COIN)
 
     # Penalize dropping a bomb when there is no escape route
     if self_action == "BOMB":
@@ -247,7 +278,7 @@ def game_events_occurred(self, old_game_state: dict, self_action: str, new_game_
 
             # Simulate the bomb that we are considering placing
             hypothetical_bombs.append(
-                ((x, y), 4)
+                ((x, y), 3)
             )
 
             safe_to_escape = can_escape_from(
@@ -260,8 +291,6 @@ def game_events_occurred(self, old_game_state: dict, self_action: str, new_game_
 
             if not safe_to_escape:
                 events.append(UNSAFE_BOMB)
-            elif e.BOMB_DROPPED in events:
-                events.append(USEFUL_SAFE_BOMB)
 
     reward = reward_from_events(self, events)
 
@@ -309,6 +338,9 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: List[str
         "my-saved-model.pt"
     )
 
+    self.visited_positions.clear()
+    self.recent_positions.clear()
+
 
 
 def reward_from_events(self, events: List[str]) -> torch.Tensor:
@@ -319,26 +351,26 @@ def reward_from_events(self, events: List[str]) -> torch.Tensor:
     certain behavior.
     """
     game_rewards = {
-        e.COIN_COLLECTED: 8,
-        e.COIN_FOUND: 1,
-        e.CRATE_DESTROYED: 5,
-
-        e.KILLED_OPPONENT: 15,
+        e.COIN_COLLECTED: 20,
+        e.COIN_FOUND: 5,
+        e.CRATE_DESTROYED: 8,
+        e.KILLED_OPPONENT: 30,
 
         e.WAITED: -1,
-        e.INVALID_ACTION: -8,
-        e.KILLED_SELF: -60,
-        e.GOT_KILLED: -35,
+        e.INVALID_ACTION: -5,
+        e.KILLED_SELF: -30,
+        e.GOT_KILLED: -25,
 
-        e.SURVIVED_ROUND: 3,
+        e.SURVIVED_ROUND: 1,
 
-        ESCAPED_DANGER: 8,
-        ENTERED_DANGER: -12,
-        UNSAFE_BOMB: -25,
-        WAITED_IN_DANGER: -10,
-        USEFUL_SAFE_BOMB: 2,
-        CLOSER_TO_COIN: 0.5,
-        FARTHER_FROM_COIN: -0.3,
+        ESCAPED_DANGER: 5,
+        ENTERED_DANGER: -5,
+        UNSAFE_BOMB: -15,
+
+        MOVED_TOWARD_COIN: 1,
+        MOVED_AWAY_FROM_COIN: -0.5,
+        NEW_POSITION: 0.5,
+        REPEATED_POSITION: -0.5,
     }
     reward_sum = 0
     for event in events:

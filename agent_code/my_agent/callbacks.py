@@ -2,6 +2,7 @@ import math
 import os
 import random
 from collections import deque
+from tracemalloc import start
 
 import torch
 
@@ -20,12 +21,6 @@ MODEL_FILE = "my-saved-model.pt"
 # first features count: 4 coins directions, 4 free up, right, down, left, 1 bomb availability
 # 4 adjacent crate indicators, 4 adjacents enemy indicators, 4 danger indicators, 1 current danger indicator
 N_OBSERVATIONS = 26
-MOVE_DELTAS = {
-    'UP': (0, -1),
-    'RIGHT': (1, 0),
-    'DOWN': (0, 1),
-    'LEFT': (-1, 0),
-}
 
 def setup(self):
     """
@@ -71,6 +66,67 @@ def _load_model_state(path):
         return torch.load(path, map_location=device)
 
 
+def bfs_direction_to_nearest_target(field, start, targets, bombs, others):
+    # retrun a one-hot first step toward the nearest reachable target
+
+    if not targets:
+        return [0,0,0,0]
+
+    targets = set(targets)
+    bomb_positions = {bomb_position for bomb_position, _ in bombs}
+    enemy_positions = {agent[3] for agent in others}
+
+    # this order is consistent with the feature vector and ACTIONS
+    directions = [
+        ((0, -1), [1, 0, 0, 0]),  # UP
+        ((1, 0), [0, 1, 0, 0]),   # RIGHT
+        ((0, 1), [0, 0, 1, 0]),  # DOWN
+        ((-1, 0), [0, 0, 0, 1]), # LEFT
+    ]
+
+    def is_walkable(position):
+        px, py = position
+
+        if px < 0 or py < 0 or px >= field.shape[0] or py >= field.shape[1]:
+            return False
+
+        if field[px, py] != 0:
+            return False
+
+        if position in enemy_positions:
+            return False
+
+        if position in bomb_positions and position != start:
+            return False
+
+        return True
+
+    queue = deque([(start, None)])
+    visited = {start}
+
+    while queue:
+        current, first_direction = queue.popleft()
+
+        if current in targets and current != start:
+            return first_direction
+
+        cx, cy = current
+
+        for (dx, dy), direction_one_hot in directions:
+            next_position = (cx + dx, cy + dy)
+
+            if next_position in visited or not is_walkable(next_position):
+                continue
+
+            visited.add(next_position)
+
+            queue.append(
+                (next_position,
+                 direction_one_hot if first_direction is None else first_direction,)
+            )
+
+    return [0,0,0,0]
+
 def act(self, game_state: dict) -> str:
     """
     Your agent should parse the input, think, and take a decision.
@@ -107,120 +163,17 @@ def act(self, game_state: dict) -> str:
     if features is None:
         return "WAIT"
 
-    valid_actions = get_valid_actions(game_state)
-
     if self.train and random.random() < eps_threshold:
-        weights = np.array(
-            [0.22 if action in MOVE_DELTAS else 0.08 if action == "WAIT" else 0.04
-             for action in valid_actions],
-            dtype=np.float32
-        )
-        weights = weights / weights.sum()
-        return np.random.choice(valid_actions, p=weights)
+        action = random.randrange(len(ACTIONS))
     else:
         with torch.no_grad():
             q_values = self.policy_net(features)
-            invalid_actions = [
-                action_index for action_index, action in enumerate(ACTIONS)
-                if action not in valid_actions
-            ]
-            if invalid_actions:
-                q_values[:, invalid_actions] = -float("inf")
             # print("Features:", features.cpu().numpy())
             # print("Q-values:", q_values.cpu().numpy())
             # print("Chosen:", ACTIONS[q_values.argmax(dim=1).item()])
         action = q_values.argmax(dim=1).item()
 
     return ACTIONS[action]
-
-
-def get_valid_actions(game_state: dict) -> list:
-    if game_state is None:
-        return ["WAIT"]
-
-    field = game_state["field"]
-    explosion_map = game_state["explosion_map"]
-    bombs = game_state["bombs"]
-    others = game_state["others"]
-    bomb_positions = {bomb_pos for bomb_pos, timer in bombs}
-    enemy_positions = {agent[3] for agent in others}
-    _, _, bomb_available, (x, y) = game_state["self"]
-    current_position = (x, y)
-    current_danger = is_position_danger(field, explosion_map, current_position, bombs)
-
-    safe_moves = []
-    legal_moves = []
-    for action, (dx, dy) in MOVE_DELTAS.items():
-        position = (x + dx, y + dy)
-        if not _is_free_tile(field, position, bomb_positions, enemy_positions):
-            continue
-
-        legal_moves.append(action)
-        if not is_position_danger(field, explosion_map, position, bombs):
-            safe_moves.append(action)
-
-    valid_actions = safe_moves or legal_moves
-
-    if not current_danger:
-        valid_actions.append("WAIT")
-
-    if _can_place_useful_safe_bomb(game_state):
-        valid_actions.append("BOMB")
-
-    return valid_actions or ["WAIT"]
-
-
-def _is_free_tile(field, position, bomb_positions, enemy_positions):
-    x, y = position
-    if x < 0 or y < 0 or x >= field.shape[0] or y >= field.shape[1]:
-        return False
-    return (
-        field[x, y] == 0
-        and position not in bomb_positions
-        and position not in enemy_positions
-    )
-
-
-def _can_place_useful_safe_bomb(game_state):
-    field = game_state["field"]
-    explosion_map = game_state["explosion_map"]
-    bombs = game_state["bombs"]
-    others = game_state["others"]
-    _, _, bomb_available, position = game_state["self"]
-
-    if not bomb_available:
-        return False
-
-    if is_position_danger(field, explosion_map, position, bombs):
-        return False
-
-    hypothetical_bombs = list(bombs)
-    hypothetical_bombs.append((position, 4))
-    if not can_escape_from(position, field, hypothetical_bombs, others, explosion_map):
-        return False
-
-    return _bomb_has_target(field, position, others)
-
-
-def _bomb_has_target(field, position, others):
-    x, y = position
-    enemy_positions = {agent[3] for agent in others}
-
-    for dx, dy in MOVE_DELTAS.values():
-        for distance in range(1, 4):
-            tx = x + dx * distance
-            ty = y + dy * distance
-            tile = field[tx, ty]
-
-            if tile == -1:
-                break
-            if tile == 1:
-                return True
-            if (tx, ty) in enemy_positions:
-                return True
-
-    return False
-
 
 
 def state_to_features(game_state: dict) -> torch.Tensor:
@@ -274,28 +227,40 @@ def state_to_features(game_state: dict) -> torch.Tensor:
 
     coins = game_state["coins"]
 
-    if coins:
-        # finding nearest coin using manhattan distance
-        nearest_coin = min(
-            coins,
-            key=lambda coin: abs(coin[0] - x) + abs(coin[1] - y)
-        )
+    coin_direction = bfs_direction_to_nearest_target(
+        field=field,
+        start=(x, y),
+        targets=coins,
+        bombs=game_state["bombs"],
+        others=game_state["others"]
+    )
+    features.extend(coin_direction)
 
-        coin_x, coin_y = nearest_coin
 
-        dx = coin_x - x
-        dy = coin_y - y
+    # coins = game_state["coins"]
 
-        # the one-hot direction of the nearest coin
-        features.append(int(dy < 0))  # up
-        features.append(int(dx > 0))  # right
-        features.append(int(dy > 0))  # down
-        features.append(int(dx < 0))  # left
+    # if coins:
+    #     # finding nearest coin using manhattan distance
+    #     nearest_coin = min(
+    #         coins,
+    #         key=lambda coin: abs(coin[0] - x) + abs(coin[1] - y)
+    #     )
 
-    else:
-        # no coins exist
-        # no direction
-        features.extend([0, 0, 0, 0])
+    #     coin_x, coin_y = nearest_coin
+
+    #     dx = coin_x - x
+    #     dy = coin_y - y
+
+    #     # the one-hot direction of the nearest coin
+    #     features.append(int(dy < 0))  # up
+    #     features.append(int(dx > 0))  # right
+    #     features.append(int(dy > 0))  # down
+    #     features.append(int(dx < 0))  # left
+
+    # else:
+    #     # no coins exist
+    #     # no direction
+    #     features.extend([0, 0, 0, 0])
 
 
     # crate indicators
@@ -569,6 +534,11 @@ def can_escape_from(start, field, bombs, others, explosion_map, max_depth=6):
         return True
 
     # BFS search for a safe position
+
+    # We cannot escape through this direction if the starting tile
+    # is a wall, crate, enemy position, or another bomb.
+    if not is_walkable(start):
+        return False
 
     queue = deque()
     queue.append((start, 0))
