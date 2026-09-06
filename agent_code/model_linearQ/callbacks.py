@@ -9,10 +9,12 @@ import numpy as np
 
 try:
     from .features import (ACTIONS, N_FEATURES, BIAS, NO_ESCAPE, IS_INVALID,
-                           feature_matrix, context)
+                           IS_BOMB, CRATES_1, CRATES_2, CRATES_3P, OPP_TRAPPED,
+                           OPP_IN_BLAST, feature_matrix, context)
 except ImportError:
     from features import (ACTIONS, N_FEATURES, BIAS, NO_ESCAPE, IS_INVALID,
-                          feature_matrix, context)
+                          IS_BOMB, CRATES_1, CRATES_2, CRATES_3P, OPP_TRAPPED,
+                          OPP_IN_BLAST, feature_matrix, context)
 
 # LQ_WEIGHTS lets an ablation run write its own file instead of clobbering the
 # shipped weights.  Relative to THIS file - never absolute.
@@ -26,11 +28,11 @@ TIE_EPS = 1e-9                      # values this close count as tied
 # Exploration is NOT uniform over the six actions: a random BOMB can end the
 # episode, and an episode that ends early stops producing data (ch. 4.2).
 BOMB_EXPLORE = float(os.environ.get('LQ_BOMB_EXPLORE', 0.25))
-                                    # Damping protects an agent that bombs too
-                                    # much and dies. An agent that has not yet
-                                    # DISCOVERED bombing needs the opposite:
-                                    # 3 of 9 fresh trainings at 0.25 never learn
-                                    # to bomb at all, 0 of 3 at 1.0.
+                                    # BOMB sampled at this fraction of its softmax
+                                    # share. Damping protects an agent that bombs
+                                    # too much - but an agent that has not yet
+                                    # DISCOVERED bombing needs the opposite, and
+                                    # 2 of 3 fresh trainings never discover it.
 MASK_FATAL_ROUNDS = 0               # curriculum: mask provably-fatal actions for the
                                     # first N training rounds, then learn from real
                                     # deaths. 0 = off. Ablate this.
@@ -45,8 +47,58 @@ MASK_FATAL_ROUNDS = 0               # curriculum: mask provably-fatal actions fo
 # count barely moved when we went greedy: those actions were never exploration.
 # Masking removes the whole failure mode instead of hoping the weights order
 # themselves correctly (Huang & Ontanon 2022, invalid action masking).
-MASK_INVALID = os.environ.get('LQ_MASK_INVALID', '1') != '0'
-BOMBPROBE = os.environ.get('LQ_BOMBPROBE', '0') != '0'   # diagnostic only    # ablate this.
+MASK_INVALID = os.environ.get('LQ_MASK_INVALID', '1') != '0'    # ablate this.
+
+# The same argument, one step further.  no_escape is EXACT, not a heuristic: it
+# is the backward recursion over the bomb timeline in danger.py, and it says the
+# destination has no surviving continuation at all.  Leaving that to the linear
+# model means a large enough Q elsewhere can outvote a certain death, and the
+# agent kills itself 0.45 times per round.  A hard filter removes the choice.
+# This is the "ActionFilter" of the Skynet Pommerman agent (Gao et al. 2019) and
+# the shallow-lookahead safety filter of Kartal et al. (2019), both of which
+# report it as the component that makes model-free RL viable in Bomberman.
+SAFE_FILTER = os.environ.get('LQ_SAFE_FILTER', '0') != '0'
+
+# The measured weakness, stated as a number: against three coin_collector_agents
+# the agent destroys 0.46 crates per bomb and they destroy 2.87.  The learned
+# weights say why - is_bomb carries an UNCONDITIONAL +0.035, while crates_hit_1
+# is +0.007 and crates_hit_2 is -0.005.  Bombing is attractive in itself, so the
+# agent pays the four-step retreat over and over for nothing.  This filter
+# forbids only the bombs that provably accomplish nothing: no crate in the
+# blast and no opponent trapped by it.
+BOMB_FILTER = os.environ.get('LQ_BOMB_FILTER', '0') != '0'
+PROBE = os.environ.get('LQ_PROBE', '0') != '0'
+BOMBPROBE = os.environ.get('LQ_BOMBPROBE', '0') != '0'
+COINTRACE = os.environ.get('LQ_COINTRACE', '0') != '0'
+KILLTRACE = os.environ.get('LQ_KILLTRACE', '0') != '0'
+_rf = os.environ.get('LQ_RACE_FILTER', '')
+RACE_FILTER = int(_rf) if _rf.strip() != '' else None
+_RSTAT = {}
+
+# Play-time weight surgery, for asking "is this feature's pull too weak?"
+# without retraining.  LQ_WSCALE='coin_delta=2,crate_delta=-0.05' multiplies the
+# named weight (or SETS it, when the value is written with a leading '=').
+# Diagnostic only; the shipped agent sets nothing.
+WSCALE = os.environ.get('LQ_WSCALE', '')
+
+
+def apply_wscale(w, names, logger=None):
+    if not WSCALE:
+        return w
+    w = w.copy()
+    for item in WSCALE.split(','):
+        key, _, val = item.partition('=')
+        key = key.strip()
+        if key not in names:
+            raise KeyError(f'LQ_WSCALE: unknown feature {key!r}')
+        i = names.index(key)
+        if val.startswith('='):
+            w[i] = float(val[1:])
+        else:
+            w[i] *= float(val)
+        if logger:
+            logger.info(f'LQ_WSCALE {key}: -> {w[i]:+.4f}')
+    return w
 
 
 def model_path():
@@ -60,7 +112,19 @@ def setup(self):
 
     if os.path.isfile(path):
         data = np.load(path, allow_pickle=True)
-        self.w = data['w'].astype(float)
+        w = data['w'].astype(float)
+        if len(w) < N_FEATURES:
+            # New features were appended.  Keep everything already learned and
+            # start the new columns at zero: a warm start is worth ~900 rounds
+            # of phase 1 and avoids the bimodal fresh-training failure entirely.
+            self.logger.warning(f'weights have {len(w)} of {N_FEATURES} features'
+                                f' - padding the new ones with zeros (warm start)')
+            w = np.concatenate([w, np.zeros(N_FEATURES - len(w))])
+        elif len(w) > N_FEATURES:
+            raise ValueError(f'{MODEL_FILE} has {len(w)} features, code has {N_FEATURES}')
+        self.w = w
+        self.w = apply_wscale(self.w, [str(x) for x in data['feature_names']],
+                              self.logger)
         self.logger.info(f'loaded weights from {MODEL_FILE}')
     elif getattr(self, 'train', False):
         self.w = np.zeros(N_FEATURES)
@@ -72,16 +136,17 @@ def setup(self):
 
     self.tau = TAU_TRAIN if getattr(self, 'train', False) else TAU_PLAY
 
-    # The ablation switches are environment variables, so a stale export would
-    # silently ship a crippled agent - LQ_ABLATE=escape costs -5.30 margin and
-    # changes nothing visible on screen.  One log line at startup makes any such
-    # accident findable afterwards instead of unexplained.
+    # The ablation switches are environment variables, so a stale export in the
+    # shell would silently ship a crippled agent - LQ_ABLATE=escape costs -5.30
+    # margin and changes nothing visible on screen.  One log line at startup
+    # makes any such accident findable afterwards instead of unexplained.
     try:
         from .features import ABLATED
     except ImportError:
         from features import ABLATED
     self.logger.info(
         f'config: tau={self.tau} mask_invalid={MASK_INVALID} '
+        f'safe_filter={SAFE_FILTER} bomb_filter={BOMB_FILTER} '
         f'weights={MODEL_FILE} ablated={ABLATED or "none"}')
     if ABLATED:
         self.logger.warning(f'FEATURES ABLATED: {ABLATED} - not the shipped agent')
@@ -90,6 +155,57 @@ def setup(self):
 def legal_mask(phi):
     """Rows of a feature matrix whose action the framework will actually run."""
     return phi[:, IS_INVALID] < 0.5
+
+
+def playable_mask(phi, ctx=None):
+    """
+    legal_mask, optionally intersected with "does not provably kill us".
+
+    Falls back to the legal mask whenever every legal action is fatal, so the
+    filter can never empty the action set - in that position the agent is dead
+    whatever it does, and the weights may as well choose how.
+    """
+    m = legal_mask(phi)
+
+    # ---- the race gate.  Section 11 measured that opening crates efficiently
+    # gains nothing, because in classic the coins are sealed inside them and
+    # every crate opened is a coin offered to whoever is nearest.  This gate
+    # asks the question the bomb filter does not: not "does this bomb hit
+    # something" but "will I still be here to collect what it releases".
+    #
+    # A bomb dropped now detonates at t+4 and its fire clears at t+6, so a coin
+    # it releases is collectable from t+6.  If an opponent is within K steps of
+    # this tile, they can be standing on that coin before the agent - which has
+    # to retreat from its own blast first - gets back.  K defaults to that full
+    # 6-step lifecycle.  A bomb that traps an opponent is never blocked: a kill
+    # is worth 5 points and is not a contested resource.
+    if RACE_FILTER is not None and ctx is not None and ctx.get('d_to_opp') is not None:
+        _RSTAT['steps'] = _RSTAT.get('steps', 0) + 1
+        d_opp = int(ctx['d_to_opp'][ctx['pos']])
+        if d_opp <= RACE_FILTER:
+            contested = m & ((phi[:, IS_BOMB] < 0.5) | (phi[:, OPP_TRAPPED] > 0.5))
+            if contested.any():
+                if not np.array_equal(contested, m):
+                    _RSTAT['blocked'] = _RSTAT.get('blocked', 0) + 1
+                m = contested
+        if _RSTAT['steps'] % 2000 == 0:
+            import json
+            with open(os.environ.get('LQ_RACE_OUT', '/tmp/racefilter.json'), 'w') as f:
+                json.dump(_RSTAT, f)
+
+    if SAFE_FILTER:
+        survivable = m & (phi[:, NO_ESCAPE] < 0.5)
+        if survivable.any():
+            m = survivable
+
+    if BOMB_FILTER:
+        hits = (phi[:, CRATES_1] + phi[:, CRATES_2] + phi[:, CRATES_3P]
+                + phi[:, OPP_TRAPPED]) > 0.5
+        useful = m & (hits | (phi[:, IS_BOMB] < 0.5))
+        if useful.any():
+            m = useful
+
+    return m
 
 
 def action_probabilities(q, tau, legal=None):
@@ -135,7 +251,18 @@ def act(self, game_state: dict) -> str:
     # cached for train.py so the update never recomputes what act() already knows
     self.last_phi, self.last_q, self.last_ctx = phi, q, ctx
 
-    p = action_probabilities(q, self.tau, legal_mask(phi))
+    mask = playable_mask(phi, ctx)
+    p = action_probabilities(q, self.tau, mask)
+
+    if PROBE:                       # diagnostic only: how often does the filter bite?
+        base = action_probabilities(q, self.tau, legal_mask(phi))
+        self.probe_steps = getattr(self, 'probe_steps', 0) + 1
+        if int(np.argmax(base)) != int(np.argmax(p)):
+            self.probe_changed = getattr(self, 'probe_changed', 0) + 1
+        if self.probe_steps % 20000 == 0:
+            ch = getattr(self, 'probe_changed', 0)
+            print(f'PROBE steps={self.probe_steps} changed={ch} '
+                  f'({100*ch/self.probe_steps:.2f}%)', flush=True)
 
     if getattr(self, 'train', False):
         # damp exploratory self-destruction; the greedy choice is untouched
@@ -150,7 +277,6 @@ def act(self, game_state: dict) -> str:
     idx = self.rng.choice(len(ACTIONS), p=p)
 
     if BOMBPROBE:
-        # How many crates does each bomb we drop actually destroy?
         st = self.bombprobe = getattr(self, 'bombprobe', {})
         st['steps'] = st.get('steps', 0) + 1
         if ACTIONS[idx] == 'BOMB':
@@ -160,20 +286,111 @@ def act(self, game_state: dict) -> str:
                 from danger import blast_coords
             field = game_state['field']
             bx, by = game_state['self'][3]
-            crates = [t for t in blast_coords(field, bx, by) if field[t] == 1]
+            hit = blast_coords(field, bx, by)
+            crates = [t for t in hit if field[t] == 1]
             st['bombs'] = st.get('bombs', 0) + 1
             st['crates'] = st.get('crates', 0) + len(crates)
-            st['n%d' % min(len(crates), 3)] = st.get('n%d' % min(len(crates), 3), 0) + 1
+            n = min(len(crates), 3)
+            st[f'n{n}'] = st.get(f'n{n}', 0) + 1
             if crates:
                 d = min(abs(cx - bx) + abs(cy - by) for cx, cy in crates)
-                st['d%d' % d] = st.get('d%d' % d, 0) + 1
+                st[f'd{d}'] = st.get(f'd{d}', 0) + 1
         if st['steps'] % 40000 == 0:
             b = max(st.get('bombs', 0), 1)
-            pc = lambda k: 100 * st.get(k, 0) / b
             print('BOMBPROBE bombs=%d  crates/bomb=%.2f  |  0 crates %.0f%%  1 %.0f%%  2 %.0f%%  3+ %.0f%%'
                   '  |  nearest crate at distance 1: %.0f%%  2: %.0f%%  3: %.0f%%'
-                  % (st.get('bombs', 0), st.get('crates', 0) / b,
-                     pc('n0'), pc('n1'), pc('n2'), pc('n3'),
-                     pc('d1'), pc('d2'), pc('d3')), flush=True)
+                  % (st.get('bombs', 0), st.get('crates', 0)/b,
+                     100*st.get('n0', 0)/b, 100*st.get('n1', 0)/b,
+                     100*st.get('n2', 0)/b, 100*st.get('n3', 0)/b,
+                     100*st.get('d1', 0)/b, 100*st.get('d2', 0)/b, 100*st.get('d3', 0)/b),
+                  flush=True)
+    if COINTRACE:
+        _cointrace(self, ctx, phi, mask, ACTIONS[idx])
+
+    if KILLTRACE:
+        _killtrace(self, ctx, phi, mask, ACTIONS[idx])
+
     self.logger.debug(f'q={np.round(q, 3)} -> {ACTIONS[idx]}')
     return ACTIONS[idx]
+
+
+def _cointrace(self, ctx, phi, mask, chosen):
+    """
+    Diagnostic: where is the coin race actually lost?
+
+    On every step where a coin is reachable AND some legal action strictly
+    decreases the BFS distance to it, the agent had a chance to close the gap.
+    Count how often it took that chance and what it did instead.  Results go
+    to a file because the agent runs in a subprocess whose stdout is dropped.
+    Nothing here influences play.
+    """
+    try:
+        from .features import COIN_DELTA, UNREACHABLE
+    except ImportError:
+        from features import COIN_DELTA, UNREACHABLE
+    st = self.cointrace = getattr(self, 'cointrace', {})
+    st['steps'] = st.get('steps', 0) + 1
+
+    d_here = int(ctx['d_coin_here'])
+    if d_here != UNREACHABLE:
+        st['coin_visible'] = st.get('coin_visible', 0) + 1
+        st['d_sum'] = st.get('d_sum', 0) + d_here
+        closer = [a for i, a in enumerate(ACTIONS)
+                  if mask[i] and phi[i, COIN_DELTA] < 0]
+        if not closer:
+            st['boxed_in'] = st.get('boxed_in', 0) + 1
+        else:
+            st['could_approach'] = st.get('could_approach', 0) + 1
+            if chosen in closer:
+                st['did_approach'] = st.get('did_approach', 0) + 1
+            else:
+                st['miss_danger' if ctx['in_danger'] else 'miss_free'] = \
+                    st.get('miss_danger' if ctx['in_danger'] else 'miss_free', 0) + 1
+                st['miss_' + chosen] = st.get('miss_' + chosen, 0) + 1
+
+    if st['steps'] % 1000 == 0:
+        import json
+        with open(os.environ.get('LQ_COINTRACE_OUT', '/tmp/cointrace.json'), 'w') as f:
+            json.dump(st, f)
+
+def _killtrace(self, ctx, phi, mask, chosen):
+    """
+    Diagnostic: is the kill channel starved of OPPORTUNITY, or of ACTION?
+
+    A kill is worth 5 points and Model LinQ takes only 0.11 per round, while
+    the whole deficit against coin_collector is 0.04 kills.  Two very different
+    explanations, and they call for opposite fixes:
+
+      opportunity-starved  the situation almost never arises, so no weight on
+                           opp_trapped can help - the agent has to be made to
+                           CREATE the situation (positioning), not to value it
+      action-starved       the situation arises and the policy declines it, so
+                           a weight or a filter is enough
+
+    This counts both.  Nothing here influences play.
+    """
+    b = ACTIONS.index('BOMB')
+    st = self.killtrace = getattr(self, 'killtrace', {})
+    st['steps'] = st.get('steps', 0) + 1
+
+    if not mask[b]:
+        st['bomb_illegal'] = st.get('bomb_illegal', 0) + 1
+    else:
+        st['bomb_legal'] = st.get('bomb_legal', 0) + 1
+        covers = phi[b, OPP_IN_BLAST] > 0.5
+        traps = phi[b, OPP_TRAPPED] > 0.5
+        if covers:
+            st['covers'] = st.get('covers', 0) + 1
+            if chosen == 'BOMB':
+                st['covers_took'] = st.get('covers_took', 0) + 1
+        if traps:
+            st['traps'] = st.get('traps', 0) + 1
+            if chosen == 'BOMB':
+                st['traps_took'] = st.get('traps_took', 0) + 1
+            else:
+                st['traps_missed_' + chosen] = st.get('traps_missed_' + chosen, 0) + 1
+
+    if st['steps'] % 1000 == 0:
+        import json
+        with open(os.environ.get('LQ_KILLTRACE_OUT', '/tmp/killtrace.json'), 'w') as f:
+            json.dump(st, f)

@@ -31,9 +31,11 @@ LAMBDA = float(os.environ.get('LQ_LAMBDA', 0.80))
                     # credit assignment AND one leg of the deadly triad. Ablate
                     # to 0.0 for one-step Expected SARSA.
 ALPHA = float(os.environ.get('LQ_ALPHA', 0.01))
-                    # normalised by ||phi||^2 below. A CONSTANT step size cannot
-                    # track a non-stationary target - the documented cause of
-                    # finding 5. Decay it during any opponent phase.
+                    # normalised by ||phi||^2 below.  Switchable because a
+                    # CONSTANT step size cannot track a non-stationary target:
+                    # when the opponent's behaviour shifts, the fitted values go
+                    # stale and a fixed alpha has no mechanism to forget them.
+                    # That is the documented cause of finding 5.
 USE_SHAPING = os.environ.get('LQ_SHAPING', '1') != '0'
                     # see the note below: with LEVEL features present, the state
                     # potential duplicates them and distorts their weights.
@@ -57,8 +59,8 @@ REWARDS_TRUE = {
 #                   Bombing was FREE in the reward, and the learner noticed:
 #                   is_bomb carried an unconditional +0.035.  Charging a step
 #                   for it makes a bomb an investment that has to pay back.
-BOMB_COST = float(os.environ.get('LQ_BOMB_COST', 0.02))
-CRATE_VALUE = float(os.environ.get('LQ_CRATE_VALUE', 0.04))
+BOMB_COST = float(os.environ.get('LQ_BOMB_COST', 0.0))
+CRATE_VALUE = float(os.environ.get('LQ_CRATE_VALUE', 0.02))
                     # raised with the cost so a bomb that opens one crate is
                     # still clearly worth taking; two crates doubles that.
 REWARDS_EXTRA = {
@@ -68,6 +70,33 @@ REWARDS_EXTRA = {
     e.INVALID_ACTION: -0.05,
     e.BOMB_DROPPED: -BOMB_COST,
 }
+
+# ---------------------------------------------------------------- drop-time credit
+# CRATE_DESTROYED arrives four steps after the bomb that caused it (BOMB_TIMER=4),
+# and the accumulating trace decays by gamma*lambda = 0.95*0.80 = 0.76 per step,
+# so the bombing action retains only 0.76^4 = 0.334 of that reward.  The shipped
+# weights are exactly what that predicts:
+#
+#     crates_hit_1   predicted 1 * 0.02 * 0.334 = 0.0067   measured +0.0073
+#     crates_hit_3p  predicted 4 * 0.02 * 0.334 = 0.0267   measured +0.0274
+#
+# while is_bomb - paid immediately, for the act itself - sits at +0.0348.  The
+# learner is not misbehaving; it is correctly fitting a signal that is five
+# times weaker than the one telling it to press BOMB.
+#
+# bomb_value[pos] is the EXACT number of crates a bomb dropped here will destroy,
+# and context() already computes it at decision time.  Paying for it on the
+# BOMB_DROPPED event removes the four-step delay and the 0.334 discount, landing
+# the credit undecayed on the action that caused it.
+#
+# This is NOT potential-based: it depends on the action, so it can in principle
+# change the optimal policy.  Two reasons it is defensible here.  It pays for the
+# true consequence rather than a proxy, and it cannot be farmed - one bomb at a
+# time, and the crates are actually destroyed.  CRATE_DESTROYED is switched off
+# when this is on, or the same crates would be paid for twice.
+DROP_REWARD = os.environ.get('LQ_DROP_REWARD', '0') != '0'
+if DROP_REWARD:
+    REWARDS_EXTRA[e.CRATE_DESTROYED] = 0.0
 
 
 def setup_training(self):
@@ -87,6 +116,14 @@ def reward_from(self, events, old_state, new_state, old_ctx=None):
     r = sum(REWARDS_TRUE.get(ev, 0.0) for ev in events)
     self.stats['true_return'] += r
     r += sum(REWARDS_EXTRA.get(ev, 0.0) for ev in events)
+
+    if DROP_REWARD and e.BOMB_DROPPED in events and old_ctx is not None:
+        # exact, known at decision time, credited to the action that caused it
+        n = int(old_ctx['bomb_value'][old_ctx['pos']])
+        r += CRATE_VALUE * n
+        self.stats['drop_crates'] += n
+        self.stats['drop_bombs'] += 1
+
     if USE_SHAPING:
         # F = gamma * Phi(s') - Phi(s).  Phi(terminal) = 0 by construction.
         r += GAMMA * potential(new_state) - potential(old_state, old_ctx)
@@ -213,9 +250,10 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: List[str
         self.q_max_seen = 0.0
 
     # Save EVERY round, not only on the reporting boundary.  self.round restarts
-    # at 0 on each main.py invocation, so any run shorter than REPORT_EVERY
-    # rounds never reached the old save() call and silently discarded everything
-    # it had learned.  The file is 4 KB; there is no reason to be thrifty.
+    # at 0 on each main.py invocation, so a training run shorter than
+    # REPORT_EVERY never reached the old save() call and silently discarded
+    # everything it learned - which is exactly what happened to the whole
+    # frozen-pool experiment.  The file is 4 KB; there is no reason to be thrifty.
     save(self)
 
 

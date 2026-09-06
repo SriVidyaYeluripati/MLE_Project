@@ -1,0 +1,130 @@
+diff --git a/agent_code/model_linearQ/features.py b/agent_code/model_linearQ/features.py
+index 26dedd8..fb20efc 100644
+--- a/agent_code/model_linearQ/features.py
++++ b/agent_code/model_linearQ/features.py
+@@ -78,6 +78,21 @@ FEATURE_NAMES = [
+     'wincoin_delta',   # 33  -1 closer to a coin I reach before any opponent
+     'no_wincoin',      # 34  no such coin is reachable
+     'mycrate_delta',   # 35  -1 closer to a crate whose coin I would win
++    # --- stage 6: DENSITY.  Every distance feature above is a MINIMUM - distance
++    # to the *nearest* coin.  A minimum cannot distinguish one coin three steps
++    # away from four coins four steps away, so the agent walks to the lone coin
++    # and then has to cross the board again.  The artificial-potential-field
++    # formulation sums a decaying term over ALL targets instead of taking the
++    # min, so density outranks proximity.  This is the mechanism behind the
++    # hand-written "priority" label in the 2019 Lord_Voldemort agent (whose
++    # Q-table learned essentially nothing except "walk toward priority") and
++    # behind the APF agents in the Pommerman literature (Zhu et al. 2021).
++    # Their version sums 1/(d+1)^2 over Euclidean distances, which walks into
++    # walls; ours reuses the same BFS metric as every other feature here.
++    'coin_field',      # 36  sum of gamma^d over the nearest coins, at the
++                       #     destination.  A LEVEL - expect it to be absorbed by
++                       #     -Phi(s) exactly as d_coin and d_crate were.
++    'coinfield_delta', # 37  -1 moving INTO higher coin density, +1 out of it
+ ]
+ N_FEATURES = len(FEATURE_NAMES)
+ (BIAS, IS_WAIT, IS_INVALID, D_COIN, COIN_DELTA, NO_COIN,
+@@ -88,7 +103,8 @@ N_FEATURES = len(FEATURE_NAMES)
+  X_DANGER_SAFETY, X_BOMB_NOESCAPE, X_BOMB_CRATES2, PHI_STATE,
+  OPP_DELTA, OPP_IN_BLAST, X_BOMB_OPP, NO_OPP,
+  OPP_TRAPPED, X_BOMB_TRAPPED,
+- WINCOIN_DELTA, NO_WINCOIN, MYCRATE_DELTA) = range(N_FEATURES)
++ WINCOIN_DELTA, NO_WINCOIN, MYCRATE_DELTA,
++ COIN_FIELD, COINFIELD_DELTA) = range(N_FEATURES)
+ 
+ GAMMA_FEAT = 0.9
+ UNREACHABLE = np.iinfo(np.int32).max
+@@ -104,6 +120,11 @@ UNREACHABLE = np.iinfo(np.int32).max
+ # --------------------------------------------------------------------------- #
+ import os as _os
+ 
++# None reproduces the shipped behaviour exactly (every tile that hits >=1 crate).
++# An integer k selects only tiles within k of the board's best bombing value.
++_bt = _os.environ.get('LQ_BOMB_TARGET', '')
++BOMB_TARGET_SLACK = int(_bt) if _bt.strip() != '' else None
++
+ ABLATION_GROUPS = {
+     'coins':    ['d_coin', 'coin_delta', 'no_coin'],
+     'crates':   ['d_crate', 'crate_delta',
+@@ -117,9 +138,15 @@ ABLATION_GROUPS = {
+                  'opp_trapped', 'x_bomb_opp', 'x_bomb_trapped'],
+     'trapped':  ['opp_trapped', 'x_bomb_trapped'],
+     'race':     ['wincoin_delta', 'no_wincoin', 'mycrate_delta'],
++    'apf':      ['coin_field', 'coinfield_delta'],
+     'phi':      ['phi_state'],
+ }
+ 
++# How many coins the potential field sums over.  Bounded because coin-heaven
++# puts 50 coins on the board and each one costs a BFS; the nearest few dominate
++# the sum anyway (gamma^d with gamma=0.9 is under 0.01 past 44 steps).
++APF_SOURCES = int(_os.environ.get('LQ_APF_SOURCES', 8))
++
+ 
+ def _build_ablation_mask():
+     names = [s.strip() for s in _os.environ.get('LQ_ABLATE', '').split(',') if s.strip()]
+@@ -306,7 +333,26 @@ def _context_uncached(game_state):
+     ctx['others'] = others
+ 
+     ctx['bomb_value'] = bomb_values(game_state['field'])
+-    worth_bombing = list(zip(*np.nonzero(ctx['bomb_value'] >= 1)))
++    # WHICH tiles count as "a place worth bombing" decides whether d_crate and
++    # crate_delta carry any information at all.  Measured on 200 fresh classic
++    # boards: bomb_value >= 1 selects 99.9% of the free tiles, so the old target
++    # set was the whole board, d_crate was 0 everywhere, and crate_delta trained
++    # to +0.0008 - constant, not ignored.  Meanwhile the BEST tile on a fresh
++    # board destroys ~10.6 crates and only 4% of tiles reach it, while the agent
++    # averages 0.46 crates per bomb.  Selecting the TOP tiles instead turns a
++    # constant into a gradient: "walk to a good bombing spot", not "walk to a
++    # crate".  Same idea as the artificial-potential-field agents in the
++    # Pommerman literature (Zhu et al. 2021), reusing a map we already compute.
++    bv = ctx['bomb_value']
++    if BOMB_TARGET_SLACK is None:
++        worth_bombing = list(zip(*np.nonzero(bv >= 1)))
++    else:
++        walkable = game_state['field'] == 0
++        best = int(bv[walkable].max()) if walkable.any() else 0
++        cut = max(1, best - BOMB_TARGET_SLACK)
++        worth_bombing = list(zip(*np.nonzero((bv >= cut) & walkable)))
++        if not worth_bombing:
++            worth_bombing = list(zip(*np.nonzero(bv >= 1)))
+     ctx['d_to_crate'] = multi_source_bfs(worth_bombing, ctx['blocked'])
+     ctx['d_crate_here'] = int(ctx['d_to_crate'][pos])
+     # ---- the race view.  d_to_opp is a multi-source BFS FROM the opponents,
+@@ -327,6 +373,25 @@ def _context_uncached(game_state):
+     ctx['d_to_mycrate'] = multi_source_bfs(_ours(worth_bombing), ctx['blocked'])
+     ctx['d_mycrate_here'] = int(ctx['d_to_mycrate'][pos])
+ 
++    # ---- the coin potential field.  One BFS per source, so the source set is
++    # capped; sorting by squared Euclidean distance first is only a pre-filter
++    # to pick WHICH coins to spend a BFS on - every distance that reaches a
++    # feature is still a real BFS distance.
++    coins = list(game_state['coins'])
++    field = np.zeros(game_state['field'].shape, dtype=float)
++    if coins:
++        if len(coins) > APF_SOURCES:
++            px, py = pos
++            coins.sort(key=lambda c: (c[0] - px) ** 2 + (c[1] - py) ** 2)
++            coins = coins[:APF_SOURCES]
++        for c in coins:
++            d = multi_source_bfs([c], ctx['blocked'])
++            field += np.where(d == UNREACHABLE, 0.0,
++                              GAMMA_FEAT ** np.minimum(d, 40))
++        field /= APF_SOURCES          # fixed divisor: the scale must not move
++    ctx['coin_field'] = field         # when a coin is collected
++    ctx['coin_field_here'] = float(field[pos])
++
+     ctx['d_safe_here'] = int(ctx['now']['d_safe'][pos])
+     ctx['in_danger'] = bool(ctx['now']['lethal'][:, pos[0], pos[1]].any())
+     return ctx
+@@ -392,6 +457,11 @@ def features(game_state, action, ctx=None):
+     else:
+         phi[WINCOIN_DELTA] = _sign(int(ctx['d_to_wincoin'][dest]), dw_here)
+ 
++    # ---- coin density (a sum over targets, not a minimum over them)
++    f_after = float(ctx['coin_field'][dest])
++    phi[COIN_FIELD] = f_after
++    phi[COINFIELD_DELTA] = float(np.sign(ctx['coin_field_here'] - f_after))
++
+     dm_here = ctx['d_mycrate_here']
+     if dm_here != UNREACHABLE:
+         phi[MYCRATE_DELTA] = _sign(int(ctx['d_to_mycrate'][dest]), dm_here)

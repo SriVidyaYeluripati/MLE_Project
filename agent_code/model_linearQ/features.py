@@ -70,6 +70,14 @@ FEATURE_NAMES = [
     # surviving continuation at all?  Same backward recursion as no_escape.
     'opp_trapped',     # 31  a bomb here leaves an opponent with no escape
     'x_bomb_trapped',  # 32  bombing AND it traps -> this is what a kill looks like
+    # --- stage 5: the RACE.  Every spatial feature above answers "how far is X
+    # from me".  None of them asks "am I closer to X than they are" - so the
+    # agent chases coins it will lose and opens crates whose coins an opponent
+    # is standing next to.  In a four-player race for a shared prize, RELATIVE
+    # distance is what decides the payoff, and it was simply not represented.
+    'wincoin_delta',   # 33  -1 closer to a coin I reach before any opponent
+    'no_wincoin',      # 34  no such coin is reachable
+    'mycrate_delta',   # 35  -1 closer to a crate whose coin I would win
 ]
 N_FEATURES = len(FEATURE_NAMES)
 (BIAS, IS_WAIT, IS_INVALID, D_COIN, COIN_DELTA, NO_COIN,
@@ -79,7 +87,8 @@ N_FEATURES = len(FEATURE_NAMES)
  D_SAFETY, SAFETY_DELTA, NO_ESCAPE, EXITS, DEAD_END,
  X_DANGER_SAFETY, X_BOMB_NOESCAPE, X_BOMB_CRATES2, PHI_STATE,
  OPP_DELTA, OPP_IN_BLAST, X_BOMB_OPP, NO_OPP,
- OPP_TRAPPED, X_BOMB_TRAPPED) = range(N_FEATURES)
+ OPP_TRAPPED, X_BOMB_TRAPPED,
+ WINCOIN_DELTA, NO_WINCOIN, MYCRATE_DELTA) = range(N_FEATURES)
 
 GAMMA_FEAT = 0.9
 UNREACHABLE = np.iinfo(np.int32).max
@@ -95,6 +104,22 @@ UNREACHABLE = np.iinfo(np.int32).max
 # --------------------------------------------------------------------------- #
 import os as _os
 
+# Which tiles count as "a place worth bombing" decides whether d_crate and
+# crate_delta carry any information at all.  Measured on 200 fresh classic
+# boards: bomb_value >= 1 selects 99.9% of the free tiles, so the shipped target
+# set is the whole board, d_crate is 0 everywhere, and crate_delta trained to
+# -0.0008 - constant, not merely ignored.  Meanwhile the BEST tile on a fresh
+# board destroys ~10.6 crates and only 4% of tiles reach it, while the agent
+# averages 0.46 crates per bomb.  Selecting the top tiles instead turns a
+# constant into a gradient: "walk to a good bombing spot", not "walk to a crate".
+# None reproduces the shipped behaviour exactly; an integer k keeps only tiles
+# within k of the board's best bombing value.
+_bt = _os.environ.get('LQ_BOMB_TARGET', '')
+BOMB_TARGET_SLACK = int(_bt) if _bt.strip() != '' else None
+
+# opp_trapped has never computed what its name says - see _danger_view.
+FIX_TRAPPED = _os.environ.get('LQ_FIX_TRAPPED', '0') != '0'
+
 ABLATION_GROUPS = {
     'coins':    ['d_coin', 'coin_delta', 'no_coin'],
     'crates':   ['d_crate', 'crate_delta',
@@ -107,6 +132,7 @@ ABLATION_GROUPS = {
     'opp':      ['opp_delta', 'opp_in_blast', 'no_opp',
                  'opp_trapped', 'x_bomb_opp', 'x_bomb_trapped'],
     'trapped':  ['opp_trapped', 'x_bomb_trapped'],
+    'race':     ['wincoin_delta', 'no_wincoin', 'mycrate_delta'],
     'phi':      ['phi_state'],
 }
 
@@ -124,6 +150,15 @@ def _build_ablation_mask():
 
 
 ABLATION_MASK, ABLATED = _build_ablation_mask()
+
+# Shaping weights, switchable so the potential can be ablated like a feature.
+# W_HUNT is the pull toward opponents.  Measured against coin_collector_agent,
+# hunting bought 0.08 kills per round (0.4 expected points) while spending ~34
+# bombs that would otherwise have opened crates - so its weight is a hypothesis
+# to test, not a constant to keep.
+W_HUNT       = float(_os.environ.get('LQ_HUNT', 0.25))
+W_CRATE      = float(_os.environ.get('LQ_CRATE', 0.15))
+CRATE_ALWAYS = _os.environ.get('LQ_CRATE_ALWAYS', '0') != '0'
 BOMB_TIMER = 4          # what a bomb dropped NOW looks like to the danger map
 NEIGHBOURS = ((0, -1), (1, 0), (0, 1), (-1, 0))
 
@@ -233,7 +268,26 @@ def _danger_view(game_state, extra_bomb=None):
     surv = survivable_map(lethal, free)
     never_lethal = free & ~lethal.any(axis=0)
     d_safe = multi_source_bfs(list(zip(*np.nonzero(never_lethal))), ~free)
-    return {'lethal': lethal, 'surv': surv, 'd_safe': d_safe}
+
+    # A SECOND survivability map, for asking the question about somebody else.
+    #
+    # `free` above has every opponent's tile cleared, which is right for our own
+    # escape planning - a body in the corridor really does block us.  But
+    # survivable_map requires free[tile], so surv[0][o] is False at every
+    # opponent's own tile unconditionally, on an empty board with no bombs at
+    # all.  opp_trapped asks `o in hit and not surv[o]`, and that second clause
+    # is therefore always true: the feature has only ever computed
+    # `any(o in hit)`, which is opp_in_blast, the feature stage 4 built it to
+    # replace.  Measured consequence: the two fire on exactly the same 443 of
+    # 443 steps, and all four kill weights sit at +0.0427.
+    #
+    # The opponent can obviously step off the tile it is standing on, so the
+    # right board for THEIR escape leaves agents out of the obstacles.  Other
+    # opponents are left walkable too, which is optimistic for them and so
+    # errs toward not claiming a trap - the safe direction for a feature whose
+    # whole job is to say "this bomb kills".
+    surv_opp = survivable_map(lethal, gs['field'] == 0)
+    return {'lethal': lethal, 'surv': surv, 'surv_opp': surv_opp, 'd_safe': d_safe}
 
 
 _CACHE = {}          # tiny content-addressed cache, see context()
@@ -287,9 +341,36 @@ def _context_uncached(game_state):
     ctx['others'] = others
 
     ctx['bomb_value'] = bomb_values(game_state['field'])
-    worth_bombing = list(zip(*np.nonzero(ctx['bomb_value'] >= 1)))
+    bv = ctx['bomb_value']
+    if BOMB_TARGET_SLACK is None:
+        worth_bombing = list(zip(*np.nonzero(bv >= 1)))
+    else:
+        walkable = game_state['field'] == 0
+        best = int(bv[walkable].max()) if walkable.any() else 0
+        cut = max(1, best - BOMB_TARGET_SLACK)
+        worth_bombing = list(zip(*np.nonzero((bv >= cut) & walkable)))
+        if not worth_bombing:                      # late game: no good spot left
+            worth_bombing = list(zip(*np.nonzero(bv >= 1)))
     ctx['d_to_crate'] = multi_source_bfs(worth_bombing, ctx['blocked'])
     ctx['d_crate_here'] = int(ctx['d_to_crate'][pos])
+    # ---- the race view.  d_to_opp is a multi-source BFS FROM the opponents,
+    # so d_to_opp[t] is how far the nearest one is from t; d_from_me[t] is how
+    # far we are.  A target is OURS when we get there first.  Two more BFS over
+    # the winners only, and the existing delta machinery does the rest.
+    ctx['d_from_me'] = multi_source_bfs([pos], ctx['blocked'])
+
+    def _ours(tiles):
+        if ctx['d_to_opp'] is None:
+            return list(tiles)                       # nobody to race
+        return [t for t in tiles
+                if int(ctx['d_from_me'][t]) < int(ctx['d_to_opp'][t])]
+
+    ctx['d_to_wincoin'] = multi_source_bfs(_ours(game_state['coins']),
+                                           ctx['blocked'])
+    ctx['d_wincoin_here'] = int(ctx['d_to_wincoin'][pos])
+    ctx['d_to_mycrate'] = multi_source_bfs(_ours(worth_bombing), ctx['blocked'])
+    ctx['d_mycrate_here'] = int(ctx['d_to_mycrate'][pos])
+
     ctx['d_safe_here'] = int(ctx['now']['d_safe'][pos])
     ctx['in_danger'] = bool(ctx['now']['lethal'][:, pos[0], pos[1]].any())
     return ctx
@@ -348,6 +429,17 @@ def features(game_state, action, ctx=None):
         # phi[D_COIN] = _decay(d_after)   # level dropped: duplicates Phi(s)
         phi[COIN_DELTA] = _sign(d_after, d_here)
 
+    # ---- the race: coins and crates we would reach FIRST
+    dw_here = ctx['d_wincoin_here']
+    if dw_here == UNREACHABLE:
+        phi[NO_WINCOIN] = 1.0
+    else:
+        phi[WINCOIN_DELTA] = _sign(int(ctx['d_to_wincoin'][dest]), dw_here)
+
+    dm_here = ctx['d_mycrate_here']
+    if dm_here != UNREACHABLE:
+        phi[MYCRATE_DELTA] = _sign(int(ctx['d_to_mycrate'][dest]), dm_here)
+
     # ---- crates
     dc_here = ctx['d_crate_here']
     if dc_here != UNREACHABLE:
@@ -389,7 +481,12 @@ def features(game_state, action, ctx=None):
         if is_bomb and ctx['bombs_left']:
             hit = set(blast_coords(ctx['field'], pos[0], pos[1]))
             phi[OPP_IN_BLAST] = float(any(o in hit for o in ctx['others']))
-            surv = ctx['after_bomb']['surv'][0]
+            # FIX_TRAPPED picks the survivability map that can actually answer
+            # the question.  Default off: the shipped weights were fitted to the
+            # degenerate version, so flipping this silently would change what
+            # those weights mean.  See _danger_view.
+            key = 'surv_opp' if FIX_TRAPPED else 'surv'
+            surv = ctx['after_bomb'][key][0]
             phi[OPP_TRAPPED] = float(any(o in hit and not surv[o] for o in ctx['others']))
 
     # ---- conjunctions
@@ -434,10 +531,12 @@ def potential(game_state, ctx=None):
     phi = 0.25 * _decay(ctx['d_safe_here'])             # be somewhere survivable
     if ctx['d_coin_here'] != UNREACHABLE:
         phi += 0.30 * _decay(ctx['d_coin_here'])        # then chase coins
+        if CRATE_ALWAYS:
+            phi += W_CRATE * _decay(ctx['d_crate_here'])
     elif ctx['d_crate_here'] != UNREACHABLE:
-        phi += 0.15 * _decay(ctx['d_crate_here'])       # otherwise open crates
-    if ctx['bombs_left'] and ctx['d_opp_here'] != UNREACHABLE:
-        phi += 0.25 * _decay(ctx['d_opp_here'])         # hunt only when armed
+        phi += W_CRATE * _decay(ctx['d_crate_here'])    # otherwise open crates
+    if W_HUNT and ctx['bombs_left'] and ctx['d_opp_here'] != UNREACHABLE:
+        phi += W_HUNT * _decay(ctx['d_opp_here'])       # hunt only when armed
     return phi
 
 
