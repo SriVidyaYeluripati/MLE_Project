@@ -51,11 +51,22 @@ REWARDS_TRUE = {
 #                   standing in for the lost remainder of the episode (ch. 5.3)
 #   CRATE_DESTROYED the crate -> coin chain is too long to learn from coins alone
 #   INVALID_ACTION  a wasted step
+#   BOMB_DROPPED    83% of this agent's bombs destroyed nothing (LQ_BOMBPROBE).
+#                   BOMB is a whole action, so those were ~10% of its moves
+#                   spent on nothing, plus the cost of dodging its own blast.
+#                   Bombing was FREE in the reward, and the learner noticed:
+#                   is_bomb carried an unconditional +0.035.  Charging a step
+#                   for it makes a bomb an investment that has to pay back.
+BOMB_COST = float(os.environ.get('LQ_BOMB_COST', 0.02))
+CRATE_VALUE = float(os.environ.get('LQ_CRATE_VALUE', 0.04))
+                    # raised with the cost so a bomb that opens one crate is
+                    # still clearly worth taking; two crates doubles that.
 REWARDS_EXTRA = {
     e.KILLED_SELF: -1.0,
     e.GOT_KILLED: -1.0,
-    e.CRATE_DESTROYED: 0.02,
+    e.CRATE_DESTROYED: CRATE_VALUE,
     e.INVALID_ACTION: -0.05,
+    e.BOMB_DROPPED: -BOMB_COST,
 }
 
 

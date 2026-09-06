@@ -45,7 +45,8 @@ MASK_FATAL_ROUNDS = 0               # curriculum: mask provably-fatal actions fo
 # count barely moved when we went greedy: those actions were never exploration.
 # Masking removes the whole failure mode instead of hoping the weights order
 # themselves correctly (Huang & Ontanon 2022, invalid action masking).
-MASK_INVALID = os.environ.get('LQ_MASK_INVALID', '1') != '0'    # ablate this.
+MASK_INVALID = os.environ.get('LQ_MASK_INVALID', '1') != '0'
+BOMBPROBE = os.environ.get('LQ_BOMBPROBE', '0') != '0'   # diagnostic only    # ablate this.
 
 
 def model_path():
@@ -147,5 +148,32 @@ def act(self, game_state: dict) -> str:
         p /= p.sum()
 
     idx = self.rng.choice(len(ACTIONS), p=p)
+
+    if BOMBPROBE:
+        # How many crates does each bomb we drop actually destroy?
+        st = self.bombprobe = getattr(self, 'bombprobe', {})
+        st['steps'] = st.get('steps', 0) + 1
+        if ACTIONS[idx] == 'BOMB':
+            try:
+                from .danger import blast_coords
+            except ImportError:
+                from danger import blast_coords
+            field = game_state['field']
+            bx, by = game_state['self'][3]
+            crates = [t for t in blast_coords(field, bx, by) if field[t] == 1]
+            st['bombs'] = st.get('bombs', 0) + 1
+            st['crates'] = st.get('crates', 0) + len(crates)
+            st['n%d' % min(len(crates), 3)] = st.get('n%d' % min(len(crates), 3), 0) + 1
+            if crates:
+                d = min(abs(cx - bx) + abs(cy - by) for cx, cy in crates)
+                st['d%d' % d] = st.get('d%d' % d, 0) + 1
+        if st['steps'] % 40000 == 0:
+            b = max(st.get('bombs', 0), 1)
+            pc = lambda k: 100 * st.get(k, 0) / b
+            print('BOMBPROBE bombs=%d  crates/bomb=%.2f  |  0 crates %.0f%%  1 %.0f%%  2 %.0f%%  3+ %.0f%%'
+                  '  |  nearest crate at distance 1: %.0f%%  2: %.0f%%  3: %.0f%%'
+                  % (st.get('bombs', 0), st.get('crates', 0) / b,
+                     pc('n0'), pc('n1'), pc('n2'), pc('n3'),
+                     pc('d1'), pc('d2'), pc('d3')), flush=True)
     self.logger.debug(f'q={np.round(q, 3)} -> {ACTIONS[idx]}')
     return ACTIONS[idx]
