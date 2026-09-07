@@ -1,48 +1,42 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.ipynb_checkpoints/
 
-# Virtual environments
-.venv/
-venv/
-env/
-
+!agent_code/model_linearQ/weights.npz
+!agent_code/my_agent/my-saved-model.pt
+!results/**
+!results/.gitkeep
+!results/ablation/
+!results/ablation/**
+!screenshots/.gitkeep
+# Editors / OS
+# Final weights for a submitted agent MUST stay tracked - whitelisted below.
 # Framework output
+# Packaged submissions - rebuild these from source, never track them
+# Python
+# Training artefacts that are not the submitted model.
+# Virtual environments
+# ablation results are experimental data, not build output - keep them
+# scratch from experiment drivers
+# teammate agents imported for cross-model tournaments; they live on their own branches
+*.egg-info/
+*.log
+*.py[cod]
+*.zip
+.DS_Store
+.idea/
+.ipynb_checkpoints/
+.pytest_cache/
+.trapc_done/
+.venv/
+.vscode/
+__pycache__/
+agent_code/*/*.npz
+agent_code/*/*.pt
+agent_code/*/checkpoints/
+agent_code/model_dqn/
+agent_code/model_gbt/
+agent_code/model_linearQ/w_*.npz
+env/
 logs/
 replays/
 results/*
-!results/.gitkeep
 screenshots/*
-!screenshots/.gitkeep
-
-# Packaged submissions - rebuild these from source, never track them
-*.zip
-
-# Training artefacts that are not the submitted model.
-# Final weights for a submitted agent MUST stay tracked - whitelisted below.
-agent_code/*/checkpoints/
-agent_code/*/*.npz
-agent_code/*/*.pt
-!agent_code/model_linearQ/weights.npz
-!agent_code/my_agent/my-saved-model.pt
-
-# Editors / OS
-.vscode/
-.idea/
-.DS_Store
-
-# ablation results are experimental data, not build output - keep them
-!results/ablation/
-!results/ablation/**
-!results/**
-
-!results/**
-
-!results/**
-
-__pycache__/
-*.pyc
-agent_code/*/logs/
+venv/
