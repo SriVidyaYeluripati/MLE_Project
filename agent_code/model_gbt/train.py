@@ -3,6 +3,7 @@ from collections import deque
 from typing import List
 
 import numpy as np
+np.random.seed(0)
 from sklearn.ensemble import GradientBoostingRegressor
 
 import events as e
@@ -18,7 +19,7 @@ LEARNING_RATE = 0.1
 MIN_SAMPLES = 500
 EPS_START = 1.0
 EPS_END = 0.05
-EPS_DECAY_ROUNDS = 400
+EPS_DECAY_ROUNDS = 1500
 USE_SYMMETRY = True
 
 DIR_BLOCKS = [0, 4, 8, 12, 17, 24]
@@ -62,11 +63,32 @@ def _record(self, old_state, action, new_state, reward):
 
 
 def game_events_occurred(self, old_game_state, self_action, new_game_state, events):
-    _record(self, old_game_state, self_action, new_game_state, reward_from_events(self, events))
+    reward = reward_from_events(self, events) + bomb_safety_bonus(old_game_state, self_action)
+    _record(self, old_game_state, self_action, new_game_state, reward)
 
 
 def end_of_round(self, last_game_state, last_action, events):
-    _record(self, last_game_state, last_action, None, reward_from_events(self, events))
+    reward = reward_from_events(self, events) + bomb_safety_bonus(last_game_state, last_action)
+    _record(self, last_game_state, last_action, None, reward)
+
+    self.round_count += 1
+    frac = min(1.0, self.round_count / EPS_DECAY_ROUNDS)
+    self.epsilon = EPS_START + frac * (EPS_END - EPS_START)
+
+    if self.round_count % REFIT_EVERY == 0 and len(self.buffer) >= MIN_SAMPLES:
+        _refit(self)
+        with open(MODEL_FILE, "wb") as f:
+            pickle.dump(self.model, f)
+        self.logger.info(f"Refit @ round {self.round_count}: {len(self.buffer)} transitions, eps={self.epsilon:.3f}")
+
+
+def bomb_safety_bonus(game_state, action):
+    if action != "BOMB" or game_state is None:
+        return 0.0
+    f = state_to_features(game_state)
+    if f is None:
+        return 0.0
+    return 2.0 if f[23] else -3.0
 
     self.round_count += 1
     frac = min(1.0, self.round_count / EPS_DECAY_ROUNDS)
@@ -118,7 +140,7 @@ def reward_from_events(self, events: List[str]) -> float:
     rewards = {
         e.COIN_COLLECTED: 3.0,
         e.KILLED_OPPONENT: 5.0,
-        e.CRATE_DESTROYED: 0.3,
+        e.CRATE_DESTROYED: 1.0,
         e.COIN_FOUND: 0.2,
         e.INVALID_ACTION: -1.0,
         e.KILLED_SELF: -5.0,
