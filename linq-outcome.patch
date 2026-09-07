@@ -1,0 +1,66 @@
+diff --git a/experiments/PREREG_trapped_confirm.md b/experiments/PREREG_trapped_confirm.md
+index c3ca8cd..a5f2810 100644
+--- a/experiments/PREREG_trapped_confirm.md
++++ b/experiments/PREREG_trapped_confirm.md
+@@ -106,3 +106,61 @@ must be reported that way.
+ - Reporting this as confirmation of the *bug* rather than of the *coins effect*.
+   The bug is established independently, by code inspection and a 443/443
+   behavioural match, and does not depend on this experiment either way.
++
++---
++
++## Outcome, appended after the run
++
++Run 2026-09-07 in the project codespace, all 10 seeds, all 20 evaluations.
++
++| paired, fix minus base, n=10 | mean | sd | better in | t | 95% CI |
++|---|---|---|---|---|---|
++| **coins (PRIMARY)** | +0.160 | 0.748 | 6/10 | **+0.68** | [-0.375, +0.695] |
++| kills | -0.020 | 0.087 | 5/10 | -0.73 | [-0.082, +0.042] |
++| score | +0.056 | 1.004 | 4/10 | +0.18 | [-0.662, +0.774] |
++| bombs | +1.73 | 6.45 | 7/10 | +0.85 | predicted *down* |
++| margin | +0.127 | 1.208 | 4/10 | +0.33 | - |
++
++**NULL on the pre-registered primary.** The exploratory +0.328 does not
++replicate and is withdrawn as a candidate finding. The secondary mechanism
++test also failed, and in the wrong direction: bombs went up, not down.
++
++### Two errors in this document, recorded rather than quietly fixed
++
++1. The decision rule above says `t > 2.262` and calls it one-sided. 2.262 is
++   the **two-sided** .05 value at df=9; the one-sided value is **1.833**. The
++   analysis script computed 1.833 correctly. Immaterial here (t = 0.68 fails
++   both), but a pre-registration only checked when convenient is not one.
++
++2. The power table above was built on the exploratory sd of 0.291. The true
++   sd is **0.748**, so the promised "95% power at the observed effect" was
++   really **36%**. Corrected:
++
++   | effect | true power at n=10 |
++   |---|---|
++   | +0.164 | 16% |
++   | +0.328 | 36% |
++   | +0.500 | 62% |
++   | +0.700 | 86% |
++
++   So this is **not** a tight bounded null. It rules out a gain above ~+0.7
++   coins and cannot exclude a real +0.3. Detecting +0.3 at 80% power would
++   need n = 40 per arm - 80 trainings.
++
++### The lesson
++
++The exploratory run over-stated the effect **and** under-stated its spread,
++and both are one selection artefact: a metric is picked out of five precisely
++on the run where its numerator ran high and its denominator ran low.
++
++> Never power a confirmatory study on the variance estimate from the
++> exploratory run that motivated it. Take the spread from a control condition
++> measured for its own sake, and treat the exploratory effect as an upper
++> bound.
++
++### What is unaffected
++
++The bug itself. It follows from three lines of code, was confirmed by
++identical firing on 443 of 443 steps, and is visible in four weights sitting
++at exactly +0.0427. Whether repairing it pays was the question here; whether
++it is broken was never in doubt.
