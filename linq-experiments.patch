@@ -1,0 +1,718 @@
+diff --git a/agent_code/model_linearQ/callbacks.py b/agent_code/model_linearQ/callbacks.py
+index 7c33c43..34f1f30 100644
+--- a/agent_code/model_linearQ/callbacks.py
++++ b/agent_code/model_linearQ/callbacks.py
+@@ -22,7 +22,12 @@ MODEL_FILE = os.environ.get('LQ_WEIGHTS', 'weights.npz')
+ 
+ OPTIMISTIC_INIT = 0.5               # untried actions look attractive (ch. 4)
+ TAU_TRAIN = 0.25                    # softmax temperature while training
+-TAU_PLAY = 0.0                      # near-greedy when it counts
++_tp = os.environ.get('LQ_TAU_PLAY', '')
++TAU_PLAY = float(_tp) if _tp.strip() != '' else 0.0   # near-greedy when it counts
++# chbridges (Heidelberg, WS20/21) report that their agent scored BETTER at a
++# deployment epsilon of 0.25 than at 0.05, because pure greedy oscillates
++# between two tiles.  Model LinQ ships greedy.  LQ_TAU_PLAY makes that
++# testable without retraining - it is a policy change, not a weight change.
+ TIE_EPS = 1e-9                      # values this close count as tied
+ 
+ # Exploration is NOT uniform over the six actions: a random BOMB can end the
+@@ -71,6 +76,8 @@ PROBE = os.environ.get('LQ_PROBE', '0') != '0'
+ BOMBPROBE = os.environ.get('LQ_BOMBPROBE', '0') != '0'
+ COINTRACE = os.environ.get('LQ_COINTRACE', '0') != '0'
+ KILLTRACE = os.environ.get('LQ_KILLTRACE', '0') != '0'
++HERDPROBE = os.environ.get('LQ_HERDPROBE', '0') != '0'
++_HSTAT = {}
+ _rf = os.environ.get('LQ_RACE_FILTER', '')
+ RACE_FILTER = int(_rf) if _rf.strip() != '' else None
+ _RSTAT = {}
+@@ -310,6 +317,13 @@ def act(self, game_state: dict) -> str:
+     if KILLTRACE:
+         _killtrace(self, ctx, phi, mask, ACTIONS[idx])
+ 
++    if HERDPROBE:
++        try:
++            _herdprobe(self, ctx, phi, ACTIONS[idx])
++        except Exception:
++            import traceback
++            open('/tmp/herdprobe_err.txt', 'w').write(traceback.format_exc())
++
+     self.logger.debug(f'q={np.round(q, 3)} -> {ACTIONS[idx]}')
+     return ACTIONS[idx]
+ 
+@@ -394,3 +408,66 @@ def _killtrace(self, ctx, phi, mask, chosen):
+         import json
+         with open(os.environ.get('LQ_KILLTRACE_OUT', '/tmp/killtrace.json'), 'w') as f:
+             json.dump(st, f)
++
++
++def _herdprobe(self, ctx, phi, chosen):
++    """
++    Redundancy check for the proposed herding feature, run BEFORE training.
++    See experiments/herd_probe.py for the reasoning; the maths lives there so
++    the two cannot drift apart.
++    """
++    import json, sys, os as _o
++    sys.path.insert(0, _o.path.join(_o.path.dirname(__file__), '..', '..', 'experiments'))
++    from herd_probe import confine, NEAR
++    try:
++        from .features import OPP_DELTA, EXITS, afterstate
++    except ImportError:
++        from features import OPP_DELTA, EXITS, afterstate
++
++    st = _HSTAT
++    st['steps'] = st.get('steps', 0) + 1
++    if st['steps'] % 200 == 0:            # before any early return, or it never runs
++        json.dump(st, open('/tmp/herdprobe.json', 'w'), indent=1)
++    if ctx.get('d_to_opp') is None:
++        return
++    d_here = int(ctx['d_to_opp'][ctx['pos']])
++    if d_here > NEAR:
++        return
++    st['near'] = st.get('near', 0) + 1
++
++    others = ctx['others']
++    opp = min(others, key=lambda o: abs(o[0]-ctx['pos'][0]) + abs(o[1]-ctx['pos'][1]))
++    field = ctx['field']
++
++    MOVES = [0, 1, 2, 3]                       # UP RIGHT DOWN LEFT in ACTIONS
++    vals, legal = [], []
++    for a in MOVES:
++        dest, ok = afterstate(ctx['pos'], ACTIONS[a], ctx['blocked'], ctx['bombs_left'])
++        legal.append(ok)
++        vals.append(confine(dest, field, opp) if ok else -1.0)
++    vals = np.array(vals); legal = np.array(legal)
++    if legal.sum() < 2:
++        return
++    st['usable'] = st.get('usable', 0) + 1
++
++    v = vals[legal]
++    if v.max() - v.min() < 1e-9:
++        st['flat'] = st.get('flat', 0) + 1       # Q1: no gradient at all
++        return
++    st['varies'] = st.get('varies', 0) + 1
++
++    # Q2 -- does its best move differ from opp_delta's best move?
++    od = phi[MOVES, OPP_DELTA]
++    best_new = {i for i, a in enumerate(MOVES) if legal[i] and vals[i] >= v.max() - 1e-9}
++    od_l = od[legal]
++    best_od = {i for i, a in enumerate(MOVES) if legal[i] and od[i] <= od_l.min() + 1e-9}
++    if best_new & best_od:
++        st['agree_oppdelta'] = st.get('agree_oppdelta', 0) + 1
++
++    # Q3 -- does it differ from `exits`, which describes MY destination?
++    ex = phi[MOVES, EXITS]
++    ex_l = ex[legal]
++    best_ex = {i for i, a in enumerate(MOVES) if legal[i] and ex[i] <= ex_l.min() + 1e-9}
++    if best_new & best_ex:
++        st['agree_exits'] = st.get('agree_exits', 0) + 1
++
+diff --git a/agent_code/model_linearQ/features.py b/agent_code/model_linearQ/features.py
+index 8f9a7d6..54fcfb8 100644
+--- a/agent_code/model_linearQ/features.py
++++ b/agent_code/model_linearQ/features.py
+@@ -13,6 +13,7 @@ Stage-1 indices 0-5 are unchanged - later stages append, never renumber.
+ from collections import deque
+ 
+ import numpy as np
++import os as _os
+ 
+ try:
+     from .danger import (precompute, danger_map, blocked_map, safe_bfs,
+@@ -78,7 +79,14 @@ FEATURE_NAMES = [
+     'wincoin_delta',   # 33  -1 closer to a coin I reach before any opponent
+     'no_wincoin',      # 34  no such coin is reachable
+     'mycrate_delta',   # 35  -1 closer to a crate whose coin I would win
+-]
++    # --- stage 6: HERDING.  Every opponent feature above is on the BOMB row
++    # only (opp_in_blast, opp_trapped) or is pure distance (opp_delta).  None
++    # of them says "standing here takes room away from them", so the agent has
++    # no gradient for CREATING a trap - which §13 showed is the binding
++    # constraint on the kill channel: 0.115 genuine traps arise per round and
++    # the agent already takes 21 of 23.  Zero unless LQ_HERD=1.
++    'opp_confine',     # 36  1 - (room the nearest opponent has, given I stand
++]                      #      on this destination) / HERD_CAP
+ N_FEATURES = len(FEATURE_NAMES)
+ (BIAS, IS_WAIT, IS_INVALID, D_COIN, COIN_DELTA, NO_COIN,
+  IS_BOMB, BOMB_READY, D_CRATE, CRATE_DELTA,
+@@ -88,7 +96,32 @@ N_FEATURES = len(FEATURE_NAMES)
+  X_DANGER_SAFETY, X_BOMB_NOESCAPE, X_BOMB_CRATES2, PHI_STATE,
+  OPP_DELTA, OPP_IN_BLAST, X_BOMB_OPP, NO_OPP,
+  OPP_TRAPPED, X_BOMB_TRAPPED,
+- WINCOIN_DELTA, NO_WINCOIN, MYCRATE_DELTA) = range(N_FEATURES)
++ WINCOIN_DELTA, NO_WINCOIN, MYCRATE_DELTA, OPP_CONFINE) = range(N_FEATURES)
++
++# Herding, off by default.  The redundancy check that justified the shape of
++# this feature, and the horizon sweep that chose CAP = 60, are in
++# experiments/herd_probe.py; it disagrees with opp_delta on ~37% of the steps
++# where it has an opinion, and has any opinion at all on ~6% of steps.
++HERD = _os.environ.get('LQ_HERD', '0') != '0'
++HERD_CAP = int(_os.environ.get('LQ_HERD_CAP', '60'))
++HERD_NEAR = int(_os.environ.get('LQ_HERD_NEAR', '8'))
++
++
++def _room(start, free, blocked_extra, cap):
++    """How many free tiles `start` can reach, counting at most `cap`."""
++    if not free[start]:
++        return 0
++    seen = {start}
++    stack = [start]
++    while stack and len(seen) < cap:
++        x, y = stack.pop()
++        for n in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
++            if n in seen or n == blocked_extra:
++                continue
++            if free[n]:
++                seen.add(n)
++                stack.append(n)
++    return len(seen)
+ 
+ GAMMA_FEAT = 0.9
+ UNREACHABLE = np.iinfo(np.int32).max
+@@ -102,7 +135,6 @@ UNREACHABLE = np.iinfo(np.int32).max
+ #
+ #   LQ_ABLATE=danger,conj python main.py ...
+ # --------------------------------------------------------------------------- #
+-import os as _os
+ 
+ # Which tiles count as "a place worth bombing" decides whether d_crate and
+ # crate_delta carry any information at all.  Measured on 200 fresh classic
+@@ -493,6 +525,17 @@ def features(game_state, action, ctx=None):
+     phi[X_DANGER_SAFETY] = float(ctx['in_danger']) * phi[SAFETY_DELTA]
+     phi[X_BOMB_NOESCAPE] = phi[IS_BOMB] * phi[NO_ESCAPE]
+     phi[X_BOMB_CRATES2] = phi[IS_BOMB] * (phi[CRATES_2] + phi[CRATES_3P])
++    # HERDING.  Unlike every other opponent feature this one lives on the
++    # MOVEMENT rows: it asks what standing on `dest` does to THEIR room, which
++    # is the only way a feature can express "create a trap" rather than
++    # "exploit one that already exists".
++    if HERD and ctx['d_to_opp'] is not None and legal:
++        if int(ctx['d_to_opp'][pos]) <= HERD_NEAR:
++            opp = min(ctx['others'],
++                      key=lambda o: abs(o[0] - pos[0]) + abs(o[1] - pos[1]))
++            free = ctx['field'] == 0
++            phi[OPP_CONFINE] = 1.0 - _room(opp, free, dest, HERD_CAP) / HERD_CAP
++
+     phi[X_BOMB_OPP] = phi[IS_BOMB] * phi[OPP_IN_BLAST]
+     phi[X_BOMB_TRAPPED] = phi[IS_BOMB] * phi[OPP_TRAPPED]
+ 
+diff --git a/agent_code/model_linearQ/train.py b/agent_code/model_linearQ/train.py
+index 627aef3..49caf71 100644
+--- a/agent_code/model_linearQ/train.py
++++ b/agent_code/model_linearQ/train.py
+@@ -26,7 +26,12 @@ except ImportError:
+                           features, context, potential, describe)
+ 
+ # ---------------------------------------------------------------- hyperparameters
+-GAMMA = 0.95        # six-step credit horizon; 1/(1-gamma) = 20
++# nickstr15 ("Maverick", Heidelberg WS20/21) report that gamma = 0.85 produced
++# endless movement loops and gamma = 0.6 fixed them, on a 23-feature agent.
++# Their argument: with features too weak to express the true remaining return,
++# the best linear fit to a long-horizon target is degenerate, so shrink the
++# horizon to what the features can actually see. LQ_GAMMA makes that testable.
++GAMMA = float(os.environ.get('LQ_GAMMA', '0.95'))   # 1/(1-gamma) = 20 steps
+ LAMBDA = float(os.environ.get('LQ_LAMBDA', 0.80))
+                     # credit assignment AND one leg of the deadly triad. Ablate
+                     # to 0.0 for one-step Expected SARSA.
+diff --git a/exp_report.py b/exp_report.py
+new file mode 100644
+index 0000000..3dfe350
+--- /dev/null
++++ b/exp_report.py
+@@ -0,0 +1,69 @@
++"""Paired analysis for the two pre-registered experiments. Reads only the
++metric each pre-registration named as primary, and says PASS or FAIL by the
++rule fixed in advance."""
++import json, os, sys, numpy as np
++from scipy import stats
++
++def load(exp, tag, s):
++    f = f'results/{exp}/{tag}{s}.json'
++    if not os.path.exists(f): return None
++    d = json.load(open(f))['by_agent']; me = d['model_linearQ']; n = me['rounds']
++    if not n: return None
++    g = lambda k: me.get(k, 0) / n
++    best = max(v['score']/v['rounds'] for k, v in d.items() if k != 'model_linearQ')
++    return dict(kills=g('kills'), score=g('score'), coins=g('coins'),
++                suicides=g('suicides'), steps=g('steps'), invalid=g('invalid'),
++                margin=g('score') - best)
++
++def paired(a, b, keys, seeds):
++    ok = [i for i in range(len(seeds)) if a[i] and b[i]]
++    return ok, {k: np.array([b[i][k] - a[i][k] for i in ok]) for k in keys}
++
++def line(k, d, crit=None, one=True, primary=False):
++    n = len(d); sd = d.std(ddof=1)
++    t = d.mean()/(sd/np.sqrt(n)) if sd > 0 else float('nan')
++    se = sd/np.sqrt(n); c = stats.t.ppf(.975, n-1)
++    mark = ''
++    if primary:
++        ok = (t > crit) if one else (abs(t) > crit)
++        mark = '   <== PASSES' if ok else '   <== FAILS'
++    print(f"  {k:9s} mean {d.mean():+7.3f}  sd {sd:6.3f}  better {int((d>0).sum()):>2d}/{n}"
++          f"  t={t:+5.2f}  95% CI [{d.mean()-c*se:+.3f}, {d.mean()+c*se:+.3f}]{mark}")
++
++KEYS = ('kills','score','coins','suicides','steps','invalid','margin')
++
++if sys.argv[1] == 'gamma':
++    S = list(range(1, 13))
++    arms = {t: [load('gamma', t, s) for s in S] for t in ('g95','g80','g60')}
++    done = {t: sum(x is not None for x in v) for t, v in arms.items()}
++    print(f"\n=== GAMMA ===  complete seeds: " +
++          "  ".join(f"{t} {done[t]}/12" for t in ('g95','g80','g60')))
++    for t in ('g95','g80','g60'):
++        v = [x for x in arms[t] if x]
++        if v: print(f"  {t}: score {np.mean([x['score'] for x in v]):.2f}  "
++                    f"coins {np.mean([x['coins'] for x in v]):.2f}  "
++                    f"kills {np.mean([x['kills'] for x in v]):.3f}  "
++                    f"steps {np.mean([x['steps'] for x in v]):.0f}  "
++                    f"invalid {np.mean([x['invalid'] for x in v]):.1f}")
++    ok, d = paired(arms['g95'], arms['g60'], KEYS, S)
++    if len(ok) < 3: print("\nnot enough paired seeds yet"); sys.exit()
++    crit = stats.t.ppf(.975, len(ok)-1)
++    print(f"\nPRIMARY: g60 minus g95, score, TWO-sided, |t| > {crit:.3f} at df={len(ok)-1}")
++    if len(ok) < 12: print(f"  NOTE: {len(ok)} of the pre-registered 12.")
++    for k in KEYS: line(k, d[k], crit, one=False, primary=(k == 'score'))
++    ok2, d2 = paired(arms['g95'], arms['g80'], ('score',), S)
++    if ok2: print(f"\n  (g80 minus g95, score {d2['score'].mean():+.3f} "
++                  f"-- intermediate point, NOT a test)")
++
++elif sys.argv[1] == 'herd':
++    S = list(range(1, 41))
++    a = [load('herd','hbase',s) for s in S]; b = [load('herd','hherd',s) for s in S]
++    ok, d = paired(a, b, KEYS, S)
++    print(f"\n=== HERDING ===  complete pairs: {len(ok)}/40")
++    if len(ok) < 3: print("not enough paired seeds yet"); sys.exit()
++    crit = stats.t.ppf(.95, len(ok)-1)
++    print(f"PRIMARY: kills, ONE-sided, t > {crit:.3f} at df={len(ok)-1}")
++    if len(ok) < 40:
++        print(f"  NOTE: {len(ok)} of the pre-registered 40 -- incomplete, "
++              f"detects {2.8*d['kills'].std(ddof=1)/np.sqrt(len(ok)):+.3f} kills at 80% power")
++    for k in KEYS: line(k, d[k], crit, one=True, primary=(k == 'kills'))
+diff --git a/experiments/PREREG_gamma.md b/experiments/PREREG_gamma.md
+new file mode 100644
+index 0000000..f858abe
+--- /dev/null
++++ b/experiments/PREREG_gamma.md
+@@ -0,0 +1,84 @@
++# Pre-registration — does a shorter credit horizon help a weak-feature linear agent?
++
++Written **before** any run. Committed before the first training launches.
++
++## The claim being tested
++
++nickstr15 ("Maverick", Heidelberg WS20/21, 23 features) report in their project
++report that **gamma = 0.85 produced endless movement loops and gamma = 0.6 fixed
++them**, and that lowering gamma was necessary — a terminal-state fix alone did
++not stop the loops.
++
++Their mechanism, which is the reason this is worth a run rather than a shrug:
++
++> with features too weak to linearly express the true remaining return, the
++> best linear fit to a long-horizon target is degenerate. Shrink the horizon to
++> what the features can actually see.
++
++Model LinQ trains at **gamma = 0.95**, i.e. an effective horizon of
++`1/(1-gamma) = 20` steps. Its features see much less than 20 steps: `d_coin`
++and `d_safety` are `0.9^steps`, which is under 0.12 by step 20, and the
++survivability recursion looks 4 steps ahead. So the premise applies here.
++
++## The honest prior, stated now
++
++**Model LinQ does not have the symptom their fix addresses.** Their agent
++looped; ours does not — 0.4 invalid actions per round (findings 12-13 fixed the
++ordering bug that caused wasted steps) and 304 steps per round against a 400
++limit. A published fix is a hypothesis about *that* agent's failure mode.
++Section 14 already recorded one such transfer failing: chbridges' deployment-
++exploration fix does nothing here, because our invalid-action mask had already
++removed the oscillation it targets.
++
++So this is a **mechanism check, not an expected win.** Recorded now so a null
++is not reinterpreted afterwards as "we knew that".
++
++## Arms, metric and rule — fixed now
++
++Three arms, **twelve seeds each**, seeds 5001-5012, paired by seed. Warm start
++from `weights.npz`, `LQ_BOMB_COST=0 LQ_CRATE_VALUE=0.02`, 600 rounds on
++`classic` vs three `peaceful_agent`s; evaluated 300 rounds vs three
++`coin_collector_agent`s, learning off, one evaluation per weight vector.
++
++| tag | switch |
++|---|---|
++| `g95` | none (control, gamma = 0.95) |
++| `g80` | `LQ_GAMMA=0.80` |
++| `g60` | `LQ_GAMMA=0.60` |
++
++**Primary comparison: `g60` vs `g95`, on score per round.** One comparison, not
++three — `g80` is an intermediate point, reported for shape and *not* tested.
++Score rather than coins because gamma changes the whole value function, not one
++channel.
++
++**Decision rule:** paired by seed, two-sided `t > 2.201` (df = 11). Two-sided
++because, unlike the herding test, there is no directional prediction: their
++result predicts improvement, the prior above predicts nothing or harm.
++
++Secondary, reported alongside: coins, kills, suicides, steps, invalid actions.
++`invalid` and `steps` matter because they are where a loop would show.
++
++## Power, from a variance measured for its own sake
++
++Using the paired score sd of **1.004** from the n=10 confirmatory run
++(`PREREG_trapped_confirm.md`) — a control condition measured separately, which
++is finding 26 applied rather than repeated:
++
++| effect on score | power at n=12 |
++|---|---|
++| +0.50 | 30% |
++| +0.80 | 62% |
++| +1.00 | 80% |
++| +1.50 | 98% |
++
++**This test can only find a large effect (>= ~1.0 score),** which is the right
++size for the claim: Maverick describe the difference between an agent that
++loops and one that does not. A null bounds the effect at roughly +-1.0 and
++should be reported as "no large effect", never as "no effect".
++
++## What would make this worthless
++
++- Testing all three pairwise comparisons and reporting the significant one.
++- Switching to coins, margin or kills if score says nothing.
++- Extending past 12 seeds after looking.
++- Reporting `g80` as a result rather than as an intermediate point.
+diff --git a/experiments/PREREG_herding.md b/experiments/PREREG_herding.md
+new file mode 100644
+index 0000000..f89eda2
+--- /dev/null
++++ b/experiments/PREREG_herding.md
+@@ -0,0 +1,121 @@
++# Pre-registration — can a confinement feature make the agent create traps?
++
++Written **before** any training run. The redundancy check that justified the
++feature ran first and is in `experiments/herd_probe.py`; its numbers are quoted
++below and were known before this document was written.
++
++## What §13 established, and why this is the remaining channel
++
++The kill channel is capped by **opportunity, not policy**. Genuine trap
++opportunities arise **0.115 times per round** and the agent already takes
++**21 of 23** of them. So raising kills cannot come from converting better; it
++must come from *creating* trap geometry — herding.
++
++No existing feature can express that. `OPP_IN_BLAST` and `OPP_TRAPPED` are
++assigned inside `if is_bomb and ctx['bombs_left']` (features.py), so they are
++**zero on every movement row**. `OPP_DELTA` says only "I got closer". Nothing
++says "standing here takes room away from them".
++
++## The feature
++
++`opp_confine`, feature 36, on the movement rows, zero unless `LQ_HERD=1`:
++
++    1 - (tiles the nearest opponent can reach, capped at HERD_CAP,
++         given that I am standing on this destination) / HERD_CAP
++
++computed only when an opponent is within `HERD_NEAR = 8` steps. `HERD_CAP = 60`.
++
++Verified on constructed boards before any training:
++
++| board | `opp_confine` across the six actions |
++|---|---|
++| opponent in the open | 0, 0, 0, 0, 0, 0 |
++| opponent in a pocket | 0, 0.950, **0.983**, 0, 0.967, 0.967 |
++
++Zero when nobody can be confined, and a spread of 0.98 when they can — so the
++column carries a real gradient rather than a constant, which is the failure that
++killed `crate_delta` (finding: `bomb_value >= 1` selected 99.9% of tiles, so the
++feature trained to -0.0008).
++
++## The redundancy check, run before this document
++
++45,600 steps of real play plus a horizon sweep (`experiments/herd_probe.py`):
++
++| CAP | has any gradient | disagrees with `opp_delta` | genuinely new |
++|---|---|---|---|
++| 25 | 4.5% of steps | 40% | 1.8% |
++| **60** | **6.2%** | 36% | **2.2%** |
++| 120 | 3.6% | 38% | 1.4% |
++
++**Not redundant** — the rejected artificial potential field (finding 24) agreed
++with the existing `d_coin` 98.6-100% of the time. This disagrees with
++`opp_delta` on about 37% of the steps where it has an opinion.
++
++**But sparse**, and that is the honest prior: it has an opinion on 6% of steps,
++and it agrees with `exits` 86% of the time, which is the tell — cornering in
++Bomberman is mostly done by walls, and walls are already in the feature vector.
++For scale: the coin-approach signal is available on 10% of steps and is
++learnable; genuine traps arise on ~0.03% and needed a curriculum (finding 7).
++
++**My stated prior: about 20% that this shows anything.** Written down now.
++
++## Arms, metric and rule — fixed now
++
++Two arms, **forty seeds each**, seeds 6001-6040, paired by seed. Warm start
++from `weights.npz` (the new column pads to zero), `LQ_BOMB_COST=0
++LQ_CRATE_VALUE=0.02`, 600 rounds on `classic` vs three `peaceful_agent`s;
++evaluated 300 rounds vs three `coin_collector_agent`s, learning off.
++
++| tag | switch |
++|---|---|
++| `hbase` | none — `opp_confine` stays identically zero |
++| `hherd` | `LQ_HERD=1` at train **and** eval |
++
++**Primary metric: kills per round.** One-sided, because the mechanism predicts
++a direction. This is forced by the arithmetic, not chosen for convenience —
++see the power section.
++
++**Decision rule:** paired by seed, `t > 1.685` (one-sided, alpha = .05,
++df = 39). Anything else is a null and gets written up as one.
++
++Secondary, reported with the primary and claimed only if the primary passes:
++score, coins, suicides.
++
++## Power, and why n = 40 and why kills
++
++From variances measured for their own sake in the n=10 confirmatory run —
++kills 0.087, coins 0.748, score 1.004 (finding 26: never take these from the
++run that motivated the experiment):
++
++| to detect | metric | n per arm needed |
++|---|---|---|
++| **+0.04 kills** — the entire deficit vs the best `coin_collector` | kills | **31** |
++| +0.20 score — that same deficit expressed in score | score | 158 |
++
++n = 40 per arm detects **+0.039 kills** at 80% power, which is almost exactly
++the gap worth closing. **A score-primary version of this experiment is not
++runnable** — 316 trainings — and that is why kills is primary. Stated in
++advance so the choice cannot look like a post-hoc convenience.
++
++n is locked at 40 now and will not be extended after looking.
++
++## Mechanism check, registered as a secondary
++
++If the feature works by making the agent seek trap geometry, then trap
++*opportunities* should rise, not just conversions. The probe measures this
++directly: genuine traps per round, currently **0.115**, and the take-up rate,
++currently **21 of 23**. Registered prediction:
++
++> `hherd` shows more genuine trap opportunities per round than `hbase`,
++> at a roughly unchanged take-up rate.
++
++If kills rise with opportunities flat, the effect is real but the stated
++mechanism is wrong, and it must be reported that way.
++
++## What would make this worthless
++
++- Extending past n = 40, or stopping early, after looking at any result.
++- Reporting score or coins as the finding if kills says nothing.
++- Reporting the feature as validated because the *probe* showed it is not
++  redundant. Non-redundant is a precondition for the experiment, not a result.
++- Quietly dropping the stated 20% prior if the answer comes out positive.
+diff --git a/experiments/fix_save.py b/experiments/fix_save.py
+new file mode 100644
+index 0000000..427a527
+--- /dev/null
++++ b/experiments/fix_save.py
+@@ -0,0 +1,46 @@
++"""One-off: make training actually persist what it learns.
++
++end_of_round() called save() only on the REPORT_EVERY boundary, and self.round
++restarts at 0 on every main.py invocation - so any run shorter than 100 rounds
++threw away everything it learned.  Also points the frozen snapshot at the
++folder the frozen_linq agent actually reads.
++"""
++import io, sys, py_compile
++
++t = 'agent_code/model_linearQ/train.py'
++s = io.open(t, encoding='utf-8').read()
++OLD = """        self.stats = defaultdict(float)
++        self.q_max_seen = 0.0
++        save(self)
++"""
++NEW = """        self.stats = defaultdict(float)
++        self.q_max_seen = 0.0
++
++    # Save EVERY round, not only on the reporting boundary.  self.round restarts
++    # at 0 on each main.py invocation, so any run shorter than REPORT_EVERY
++    # rounds never reached the old save() call and silently discarded everything
++    # it had learned.  The file is 4 KB; there is no reason to be thrifty.
++    save(self)
++"""
++if NEW in s:
++    print('train.py  : already patched')
++elif OLD in s:
++    io.open(t, 'w', encoding='utf-8').write(s.replace(OLD, NEW, 1))
++    py_compile.compile(t, doraise=True)
++    print('train.py  : PATCHED (saves every round now)')
++else:
++    sys.exit('train.py  : pattern not found - stop, do not push, tell Claude')
++
++p = 'setup_pool.sh'
++try:
++    s = io.open(p, encoding='utf-8').read()
++except FileNotFoundError:
++    sys.exit(0)
++bad, good = 'cp $A/weights.npz $A/frozen.npz', 'cp $A/weights.npz agent_code/frozen_linq/frozen.npz'
++if good in s:
++    print('setup_pool: already patched')
++elif bad in s:
++    io.open(p, 'w', encoding='utf-8').write(s.replace(bad, good, 1))
++    print('setup_pool: PATCHED (frozen.npz now goes to frozen_linq/)')
++else:
++    print('setup_pool: nothing to change')
+diff --git a/experiments/herd_probe.py b/experiments/herd_probe.py
+new file mode 100644
+index 0000000..a70e5e6
+--- /dev/null
++++ b/experiments/herd_probe.py
+@@ -0,0 +1,88 @@
++"""
++Redundancy check for a proposed HERDING feature, run BEFORE any training.
++
++Finding 24: ask whether a new feature says anything different from the ones
++already there, offline, because after training a redundant feature produces
++exactly the same evidence as a useful one.
++
++The candidate, `opp_confine`:
++    after I step onto `dest`, how confined is the nearest opponent?
++    = 1 - (tiles that opponent can reach, capped at CAP, with my body at dest)
++          / CAP
++It is 0 when they are in the open and approaches 1 as they are cornered.
++This is the "create a trap" signal that OPP_TRAPPED cannot be, because
++OPP_TRAPPED is assigned only on the BOMB row (features.py:481) and so is zero
++on every movement row.
++
++Three questions, in the order that can kill the idea cheapest:
++  Q1  does it VARY across the legal moves?  (d_crate did not: bomb_value >= 1
++      selected 99.9% of tiles, so `crate_delta` trained to -0.0008)
++  Q2  when it varies, does its best move differ from `opp_delta`'s best move?
++      opp_delta already means "get closer to the nearest opponent", and
++      cornering usually requires closing in, so this is the real test.
++  Q3  does it differ from `exits`/`dead_end`, which describe MY destination?
++"""
++import json, os, numpy as np
++from collections import deque
++
++import os as _os
++CAP = int(_os.environ.get('LQ_HERD_CAP', '25'))   # cells; beyond this, "in the open"
++NEAR = 8            # only ask the question when an opponent is within 8 steps
++
++def region_size(start, free, blocked_extra, cap=CAP):
++    """How many free tiles can `start` reach, counting at most `cap`."""
++    if not free[start]:
++        return 0
++    seen = {start}
++    dq = deque([start])
++    while dq and len(seen) < cap:
++        x, y = dq.popleft()
++        for n in ((x+1,y), (x-1,y), (x,y+1), (x,y-1)):
++            if n in seen or n == blocked_extra:
++                continue
++            if free[n]:
++                seen.add(n)
++                dq.append(n)
++    return len(seen)
++
++def confine(dest, field, opp, cap=CAP):
++    free = field == 0
++    return 1.0 - region_size(opp, free, dest, cap) / cap
++
++
++# --------------------------------------------------------------------------- #
++# RESULT, measured before any training was launched.
++#
++# 45,600 steps vs 3x coin_collector_agent, plus a horizon sweep.
++#
++#   CAP   varies/usable   varies/all   agrees with opp_delta   NEW signal
++#    25       22.2%          4.48%            60.4%              1.77%
++#    60       35.7%          6.20%            63.8%              2.24%   <- best
++#   120       21.3%          3.61%            62.5%              1.35%
++#
++# VERDICT: not redundant, but sparse.
++#
++# Not redundant: the artificial potential field (finding 24) picked the same
++# direction as the existing d_coin 98.6-100% of the time and was rejected on
++# that.  This picks a different direction from opp_delta ~37% of the times it
++# has an opinion, so it is a genuinely new signal.
++#
++# Sparse: it has any gradient at all on only ~6% of steps, and carries new
++# direction on ~2.2%.  For scale: the coin-approach signal is available on 10%
++# of steps and is learnable; genuine trap opportunities arise on ~0.03% and
++# needed a curriculum (finding 7).  This sits between.
++#
++# Why it is flat so often: one body rarely changes how much room an opponent
++# has.  Cornering somebody in Bomberman is mostly done by the WALLS, which are
++# already described by `exits` and `dead_end` - and indeed the best move here
++# agrees with `exits` 86% of the time at CAP=25.
++#
++# CONSEQUENCE FOR THE EXPERIMENT DESIGN: the effect this could produce is a
++# kill gain, not a score gain.  Powered from the sd measured in the n=10
++# confirmatory run (kills 0.087, score 1.004):
++#
++#   detect +0.04 kills (the whole deficit vs coin_collector)   n = 31 per arm
++#   detect +0.20 score (that same deficit expressed in score)  n = 158 per arm
++#
++# So kills MUST be the primary metric.  A score-primary version of this
++# experiment is not runnable: it would need 316 trainings.
+diff --git a/run_experiments.sh b/run_experiments.sh
+new file mode 100755
+index 0000000..5103ec9
+--- /dev/null
++++ b/run_experiments.sh
+@@ -0,0 +1,60 @@
++#!/usr/bin/env bash
++# Runs the two pre-registered experiments, in order, resumably.
++#
++#   bash run_experiments.sh gamma     PREREG_gamma.md    3 arms x 12 seeds
++#   bash run_experiments.sh herd      PREREG_herding.md  2 arms x 40 seeds
++#   bash run_experiments.sh both
++#
++# Uses every core.  Override with  JOBS=8 bash run_experiments.sh both
++# Safe to re-run after any interruption: a step is skipped only when its
++# marker AND its output file are both present.
++set -u
++R="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; cd "$R"
++export A=agent_code/model_linearQ
++JOBS="${JOBS:-$(nproc)}"
++mkdir -p .exp_done results/gamma results/herd logs
++
++train_one() {                       # "<tag> <seed> <exp>"
++  set -- $1; local tag=$1 s=$2 exp=$3 sw=""
++  case "$tag" in g80) sw="LQ_GAMMA=0.80";; g60) sw="LQ_GAMMA=0.60";;
++                 hherd) sw="LQ_HERD=1";; esac
++  local m=.exp_done/train_$tag$s
++  [ -f "$m" ] && [ -f "$A/w_$tag$s.npz" ] && { echo "skip  train $tag$s"; return; }
++  rm -f "$A/w_$tag$s.npz"; cp "$A/weights.npz" "$A/w_$tag$s.npz"
++  env LQ_WEIGHTS=w_$tag$s.npz LQ_BOMB_COST=0 LQ_CRATE_VALUE=0.02 $sw \
++    python main.py play --no-gui \
++    --agents model_linearQ peaceful_agent peaceful_agent peaceful_agent \
++    --train 1 --scenario classic --n-rounds 600 --seed $((5000+s)) >/dev/null 2>&1 \
++    && touch "$m" && echo "train $tag$s done $(date +%H:%M)"
++}
++eval_one() {                        # "<tag> <seed> <exp>"
++  set -- $1; local tag=$1 s=$2 exp=$3 sw=""
++  case "$tag" in g80) sw="LQ_GAMMA=0.80";; g60) sw="LQ_GAMMA=0.60";;
++                 hherd) sw="LQ_HERD=1";; esac
++  local m=.exp_done/eval_$tag$s
++  [ -f "$m" ] && [ -s "results/$exp/$tag$s.json" ] && { echo "skip  eval $tag$s"; return; }
++  env LQ_WEIGHTS=w_$tag$s.npz $sw python main.py play --no-gui \
++    --agents model_linearQ coin_collector_agent coin_collector_agent coin_collector_agent \
++    --scenario classic --n-rounds 300 --save-stats results/$exp/$tag$s.json >/dev/null 2>&1 \
++    && touch "$m" && echo "eval  $tag$s done $(date +%H:%M)"
++}
++export -f train_one eval_one
++
++jobs_gamma(){ for s in $(seq 1 12);  do for t in g95 g80 g60; do echo "$t $s gamma"; done; done; }
++jobs_herd(){  for s in $(seq 1 40);  do for t in hbase hherd;  do echo "$t $s herd";  done; done; }
++
++phase(){ local name=$1 lister=$2 n
++  n=$($lister | wc -l)
++  echo "=== $name: $n trainings, $JOBS parallel on $(nproc) cores ==="
++  $lister | xargs -P "$JOBS" -I{} bash -c 'train_one "$@"' _ {}
++  echo "=== $name: $n evaluations ==="
++  $lister | xargs -P "$JOBS" -I{} bash -c 'eval_one "$@"' _ {}
++}
++
++case "${1:-both}" in
++  gamma) phase GAMMA jobs_gamma; python3 exp_report.py gamma ;;
++  herd)  phase HERD  jobs_herd;  python3 exp_report.py herd ;;
++  both)  phase GAMMA jobs_gamma; python3 exp_report.py gamma
++         phase HERD  jobs_herd;  python3 exp_report.py herd ;;
++  *) echo "usage: bash run_experiments.sh [gamma|herd|both]"; exit 1 ;;
++esac

@@ -22,7 +22,12 @@ MODEL_FILE = os.environ.get('LQ_WEIGHTS', 'weights.npz')
 
 OPTIMISTIC_INIT = 0.5               # untried actions look attractive (ch. 4)
 TAU_TRAIN = 0.25                    # softmax temperature while training
-TAU_PLAY = 0.0                      # near-greedy when it counts
+_tp = os.environ.get('LQ_TAU_PLAY', '')
+TAU_PLAY = float(_tp) if _tp.strip() != '' else 0.0   # near-greedy when it counts
+# chbridges (Heidelberg, WS20/21) report that their agent scored BETTER at a
+# deployment epsilon of 0.25 than at 0.05, because pure greedy oscillates
+# between two tiles.  Model LinQ ships greedy.  LQ_TAU_PLAY makes that
+# testable without retraining - it is a policy change, not a weight change.
 TIE_EPS = 1e-9                      # values this close count as tied
 
 # Exploration is NOT uniform over the six actions: a random BOMB can end the
@@ -71,6 +76,8 @@ PROBE = os.environ.get('LQ_PROBE', '0') != '0'
 BOMBPROBE = os.environ.get('LQ_BOMBPROBE', '0') != '0'
 COINTRACE = os.environ.get('LQ_COINTRACE', '0') != '0'
 KILLTRACE = os.environ.get('LQ_KILLTRACE', '0') != '0'
+HERDPROBE = os.environ.get('LQ_HERDPROBE', '0') != '0'
+_HSTAT = {}
 _rf = os.environ.get('LQ_RACE_FILTER', '')
 RACE_FILTER = int(_rf) if _rf.strip() != '' else None
 _RSTAT = {}
@@ -310,6 +317,13 @@ def act(self, game_state: dict) -> str:
     if KILLTRACE:
         _killtrace(self, ctx, phi, mask, ACTIONS[idx])
 
+    if HERDPROBE:
+        try:
+            _herdprobe(self, ctx, phi, ACTIONS[idx])
+        except Exception:
+            import traceback
+            open('/tmp/herdprobe_err.txt', 'w').write(traceback.format_exc())
+
     self.logger.debug(f'q={np.round(q, 3)} -> {ACTIONS[idx]}')
     return ACTIONS[idx]
 
@@ -394,3 +408,66 @@ def _killtrace(self, ctx, phi, mask, chosen):
         import json
         with open(os.environ.get('LQ_KILLTRACE_OUT', '/tmp/killtrace.json'), 'w') as f:
             json.dump(st, f)
+
+
+def _herdprobe(self, ctx, phi, chosen):
+    """
+    Redundancy check for the proposed herding feature, run BEFORE training.
+    See experiments/herd_probe.py for the reasoning; the maths lives there so
+    the two cannot drift apart.
+    """
+    import json, sys, os as _o
+    sys.path.insert(0, _o.path.join(_o.path.dirname(__file__), '..', '..', 'experiments'))
+    from herd_probe import confine, NEAR
+    try:
+        from .features import OPP_DELTA, EXITS, afterstate
+    except ImportError:
+        from features import OPP_DELTA, EXITS, afterstate
+
+    st = _HSTAT
+    st['steps'] = st.get('steps', 0) + 1
+    if st['steps'] % 200 == 0:            # before any early return, or it never runs
+        json.dump(st, open('/tmp/herdprobe.json', 'w'), indent=1)
+    if ctx.get('d_to_opp') is None:
+        return
+    d_here = int(ctx['d_to_opp'][ctx['pos']])
+    if d_here > NEAR:
+        return
+    st['near'] = st.get('near', 0) + 1
+
+    others = ctx['others']
+    opp = min(others, key=lambda o: abs(o[0]-ctx['pos'][0]) + abs(o[1]-ctx['pos'][1]))
+    field = ctx['field']
+
+    MOVES = [0, 1, 2, 3]                       # UP RIGHT DOWN LEFT in ACTIONS
+    vals, legal = [], []
+    for a in MOVES:
+        dest, ok = afterstate(ctx['pos'], ACTIONS[a], ctx['blocked'], ctx['bombs_left'])
+        legal.append(ok)
+        vals.append(confine(dest, field, opp) if ok else -1.0)
+    vals = np.array(vals); legal = np.array(legal)
+    if legal.sum() < 2:
+        return
+    st['usable'] = st.get('usable', 0) + 1
+
+    v = vals[legal]
+    if v.max() - v.min() < 1e-9:
+        st['flat'] = st.get('flat', 0) + 1       # Q1: no gradient at all
+        return
+    st['varies'] = st.get('varies', 0) + 1
+
+    # Q2 -- does its best move differ from opp_delta's best move?
+    od = phi[MOVES, OPP_DELTA]
+    best_new = {i for i, a in enumerate(MOVES) if legal[i] and vals[i] >= v.max() - 1e-9}
+    od_l = od[legal]
+    best_od = {i for i, a in enumerate(MOVES) if legal[i] and od[i] <= od_l.min() + 1e-9}
+    if best_new & best_od:
+        st['agree_oppdelta'] = st.get('agree_oppdelta', 0) + 1
+
+    # Q3 -- does it differ from `exits`, which describes MY destination?
+    ex = phi[MOVES, EXITS]
+    ex_l = ex[legal]
+    best_ex = {i for i, a in enumerate(MOVES) if legal[i] and ex[i] <= ex_l.min() + 1e-9}
+    if best_new & best_ex:
+        st['agree_exits'] = st.get('agree_exits', 0) + 1
+

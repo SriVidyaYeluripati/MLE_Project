@@ -13,6 +13,7 @@ Stage-1 indices 0-5 are unchanged - later stages append, never renumber.
 from collections import deque
 
 import numpy as np
+import os as _os
 
 try:
     from .danger import (precompute, danger_map, blocked_map, safe_bfs,
@@ -78,7 +79,14 @@ FEATURE_NAMES = [
     'wincoin_delta',   # 33  -1 closer to a coin I reach before any opponent
     'no_wincoin',      # 34  no such coin is reachable
     'mycrate_delta',   # 35  -1 closer to a crate whose coin I would win
-]
+    # --- stage 6: HERDING.  Every opponent feature above is on the BOMB row
+    # only (opp_in_blast, opp_trapped) or is pure distance (opp_delta).  None
+    # of them says "standing here takes room away from them", so the agent has
+    # no gradient for CREATING a trap - which §13 showed is the binding
+    # constraint on the kill channel: 0.115 genuine traps arise per round and
+    # the agent already takes 21 of 23.  Zero unless LQ_HERD=1.
+    'opp_confine',     # 36  1 - (room the nearest opponent has, given I stand
+]                      #      on this destination) / HERD_CAP
 N_FEATURES = len(FEATURE_NAMES)
 (BIAS, IS_WAIT, IS_INVALID, D_COIN, COIN_DELTA, NO_COIN,
  IS_BOMB, BOMB_READY, D_CRATE, CRATE_DELTA,
@@ -88,7 +96,32 @@ N_FEATURES = len(FEATURE_NAMES)
  X_DANGER_SAFETY, X_BOMB_NOESCAPE, X_BOMB_CRATES2, PHI_STATE,
  OPP_DELTA, OPP_IN_BLAST, X_BOMB_OPP, NO_OPP,
  OPP_TRAPPED, X_BOMB_TRAPPED,
- WINCOIN_DELTA, NO_WINCOIN, MYCRATE_DELTA) = range(N_FEATURES)
+ WINCOIN_DELTA, NO_WINCOIN, MYCRATE_DELTA, OPP_CONFINE) = range(N_FEATURES)
+
+# Herding, off by default.  The redundancy check that justified the shape of
+# this feature, and the horizon sweep that chose CAP = 60, are in
+# experiments/herd_probe.py; it disagrees with opp_delta on ~37% of the steps
+# where it has an opinion, and has any opinion at all on ~6% of steps.
+HERD = _os.environ.get('LQ_HERD', '0') != '0'
+HERD_CAP = int(_os.environ.get('LQ_HERD_CAP', '60'))
+HERD_NEAR = int(_os.environ.get('LQ_HERD_NEAR', '8'))
+
+
+def _room(start, free, blocked_extra, cap):
+    """How many free tiles `start` can reach, counting at most `cap`."""
+    if not free[start]:
+        return 0
+    seen = {start}
+    stack = [start]
+    while stack and len(seen) < cap:
+        x, y = stack.pop()
+        for n in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if n in seen or n == blocked_extra:
+                continue
+            if free[n]:
+                seen.add(n)
+                stack.append(n)
+    return len(seen)
 
 GAMMA_FEAT = 0.9
 UNREACHABLE = np.iinfo(np.int32).max
@@ -102,7 +135,6 @@ UNREACHABLE = np.iinfo(np.int32).max
 #
 #   LQ_ABLATE=danger,conj python main.py ...
 # --------------------------------------------------------------------------- #
-import os as _os
 
 # Which tiles count as "a place worth bombing" decides whether d_crate and
 # crate_delta carry any information at all.  Measured on 200 fresh classic
@@ -493,6 +525,17 @@ def features(game_state, action, ctx=None):
     phi[X_DANGER_SAFETY] = float(ctx['in_danger']) * phi[SAFETY_DELTA]
     phi[X_BOMB_NOESCAPE] = phi[IS_BOMB] * phi[NO_ESCAPE]
     phi[X_BOMB_CRATES2] = phi[IS_BOMB] * (phi[CRATES_2] + phi[CRATES_3P])
+    # HERDING.  Unlike every other opponent feature this one lives on the
+    # MOVEMENT rows: it asks what standing on `dest` does to THEIR room, which
+    # is the only way a feature can express "create a trap" rather than
+    # "exploit one that already exists".
+    if HERD and ctx['d_to_opp'] is not None and legal:
+        if int(ctx['d_to_opp'][pos]) <= HERD_NEAR:
+            opp = min(ctx['others'],
+                      key=lambda o: abs(o[0] - pos[0]) + abs(o[1] - pos[1]))
+            free = ctx['field'] == 0
+            phi[OPP_CONFINE] = 1.0 - _room(opp, free, dest, HERD_CAP) / HERD_CAP
+
     phi[X_BOMB_OPP] = phi[IS_BOMB] * phi[OPP_IN_BLAST]
     phi[X_BOMB_TRAPPED] = phi[IS_BOMB] * phi[OPP_TRAPPED]
 

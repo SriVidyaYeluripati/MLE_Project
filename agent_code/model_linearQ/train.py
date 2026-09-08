@@ -26,7 +26,12 @@ except ImportError:
                           features, context, potential, describe)
 
 # ---------------------------------------------------------------- hyperparameters
-GAMMA = 0.95        # six-step credit horizon; 1/(1-gamma) = 20
+# nickstr15 ("Maverick", Heidelberg WS20/21) report that gamma = 0.85 produced
+# endless movement loops and gamma = 0.6 fixed them, on a 23-feature agent.
+# Their argument: with features too weak to express the true remaining return,
+# the best linear fit to a long-horizon target is degenerate, so shrink the
+# horizon to what the features can actually see. LQ_GAMMA makes that testable.
+GAMMA = float(os.environ.get('LQ_GAMMA', '0.95'))   # 1/(1-gamma) = 20 steps
 LAMBDA = float(os.environ.get('LQ_LAMBDA', 0.80))
                     # credit assignment AND one leg of the deadly triad. Ablate
                     # to 0.0 for one-step Expected SARSA.
