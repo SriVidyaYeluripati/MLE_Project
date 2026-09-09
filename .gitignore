@@ -41,3 +41,4 @@ results/*
 screenshots/*
 venv/
 .exp_done/
+experiments/weights/
