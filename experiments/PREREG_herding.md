@@ -119,3 +119,41 @@ mechanism is wrong, and it must be reported that way.
 - Reporting the feature as validated because the *probe* showed it is not
   redundant. Non-redundant is a precondition for the experiment, not a result.
 - Quietly dropping the stated 20% prior if the answer comes out positive.
+
+---
+
+## Outcome, appended after the run
+
+Run 2026-09-09, all 40 seed pairs, 80 trainings and 80 evaluations complete.
+
+| paired, hherd minus hbase, n=40 | mean | sd | better in | t | 95% CI |
+|---|---|---|---|---|---|
+| **kills (PRIMARY)** | **-0.003** | 0.041 | 15/40 | **-0.39** | [-0.016, +0.010] |
+| score | +0.167 | 0.731 | 22/40 | +1.44 | [-0.067, +0.400] |
+| coins | +0.180 | 0.618 | 23/40 | +1.84 | [-0.018, +0.377] |
+| suicides | -0.002 | 0.063 | 19/40 | -0.23 | [-0.023, +0.018] |
+| invalid | -0.050 | 0.203 | 16/40 | -1.56 | [-0.115, +0.015] |
+| margin | +0.228 | 0.933 | 21/40 | +1.55 | [-0.070, +0.527] |
+
+**NULL on the pre-registered primary**, and this time a *tight* one.
+
+At n=40 the test detects **+0.018 kills** at 80% power against a target
+deficit of **+0.040** - it could have seen an effect **2.2x smaller than the
+one worth having** and found none. CI width on kills is 0.026, against 1.070
+for the section-14 coins test. That one could not exclude a real effect;
+this one can. "We found nothing" and "there is nothing to find" are
+different claims, and only a powered design earns the second.
+
+**Secondaries are not claimed.** coins +0.180 (t=1.84) and score +0.167
+(t=1.44) arrived in an experiment whose primary failed, and this document
+fixed in advance that secondaries are claimed only if the primary passes.
+Third positive-looking coins secondary correctly refused.
+
+**The stated 20% prior held**, and the redundancy probe predicted it: the
+feature has an opinion on ~6% of steps and agrees with `exits` 86% of the
+time, because cornering is done by walls and walls were already represented.
+
+**What this closes.** Section 13 showed the kill channel is capped by
+opportunity - 0.115 genuine traps per round, of which the agent takes 21 of
+23. Herding was the last way to raise that number. It does not. Channel
+closed; the agent ships unchanged with LQ_HERD off.
