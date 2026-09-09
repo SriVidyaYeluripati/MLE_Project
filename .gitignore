@@ -40,3 +40,4 @@ replays/
 results/*
 screenshots/*
 venv/
+.exp_done/
