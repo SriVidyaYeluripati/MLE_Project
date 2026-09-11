@@ -149,3 +149,32 @@ remaining idea, and it is more likely to fail than to succeed.
 - Reporting kills or coins as the finding if score says nothing.
 - Switching the evaluation opponent after seeing the result.
 - Quietly dropping the 35% prior if the answer comes out positive.
+
+---
+
+## Outcome, appended after the run
+
+n=40 pairs, vs three rule_based_agents.
+
+| metric | mean | sd | better | t | 95% CI |
+|---|---|---|---|---|---|
+| **score (PRIMARY)** | **+0.174** | 0.841 | 23/40 | **+1.31** | [-0.095, +0.444] |
+| kills | +0.027 | 0.066 | 25/40 | +2.59 | [+0.006, +0.048] |
+| invalid | +0.505 | 0.859 | 26/40 | +3.72 | [+0.231, +0.780] |
+| coins | +0.039 | 0.743 | 23/40 | +0.33 | [-0.199, +0.277] |
+
+NULL on the primary. But the mechanism fired: kills rose with a CI excluding
+zero - the first predicted behavioural change to appear in nine experiments.
+It also cost 0.505 more invalid actions per round (also excluding zero), which
+is finding 13: hunting means walking into tiles an opponent just took.
+
+The channels add up exactly: kills +0.027 x 5 = +0.135, coins +0.039, sum
++0.174 = the observed score change to three decimals. So the effect is real
+and worth about +0.17 score. The pre-registration said n=40 detects +0.33;
+this landed in the band declared in advance as one the test would miss.
+
+Confirming +0.174 needs n=184 per arm - 368 trainings, ~8.4 hours - and would
+close 6.7% of the 2.61 gap. Not run.
+
+Stated prior was 35%. No measurable score gain; a measurable behavioural one.
+LQ_PHASE stays off. The agent ships unchanged.

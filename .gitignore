@@ -42,3 +42,7 @@ screenshots/*
 venv/
 .exp_done/
 experiments/weights/
+experiments/weights/
+.exp_done/
+*.patch
+__pycache__/
