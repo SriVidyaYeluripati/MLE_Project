@@ -77,6 +77,8 @@ BOMBPROBE = os.environ.get('LQ_BOMBPROBE', '0') != '0'
 COINTRACE = os.environ.get('LQ_COINTRACE', '0') != '0'
 KILLTRACE = os.environ.get('LQ_KILLTRACE', '0') != '0'
 HERDPROBE = os.environ.get('LQ_HERDPROBE', '0') != '0'
+PHASEPROBE = os.environ.get('LQ_PHASEPROBE', '0') != '0'
+_PSTAT = {'late': [], 'spread': [], 'n': 0, 'varies': 0}
 _HSTAT = {}
 _rf = os.environ.get('LQ_RACE_FILTER', '')
 RACE_FILTER = int(_rf) if _rf.strip() != '' else None
@@ -316,6 +318,34 @@ def act(self, game_state: dict) -> str:
 
     if KILLTRACE:
         _killtrace(self, ctx, phi, mask, ACTIONS[idx])
+
+    if PHASEPROBE:
+        try:
+            import json as _j
+            try:
+                from .features import X_LATE_OPPDELTA, X_LATE_BOMB, X_LATE_BOMBOPP
+            except ImportError:
+                from features import X_LATE_OPPDELTA, X_LATE_BOMB, X_LATE_BOMBOPP
+            st = _PSTAT
+            st['n'] += 1
+            st['late'].append(round(float(ctx.get('late', 0.0)), 3))
+            cols = phi[:, [X_LATE_OPPDELTA, X_LATE_BOMB, X_LATE_BOMBOPP]]
+            sp = float(cols.max(axis=0).max() - cols.min(axis=0).min())
+            st['spread'].append(round(sp, 3))
+            if sp > 1e-9:
+                st['varies'] += 1
+            if st['n'] % 500 == 0:
+                import numpy as _np
+                L = _np.array(st['late'])
+                _j.dump(dict(n=st['n'], varies=st['varies'],
+                             late_mean=float(L.mean()), late_p50=float(_np.median(L)),
+                             late_p90=float(_np.percentile(L, 90)), late_max=float(L.max()),
+                             frac_late_over_0_5=float((L > 0.5).mean()),
+                             frac_late_over_0_8=float((L > 0.8).mean())),
+                        open('/tmp/phaseprobe.json', 'w'), indent=1)
+        except Exception:
+            import traceback
+            open('/tmp/phaseprobe_err.txt', 'w').write(traceback.format_exc())
 
     if HERDPROBE:
         try:

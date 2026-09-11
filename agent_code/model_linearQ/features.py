@@ -86,7 +86,21 @@ FEATURE_NAMES = [
     # constraint on the kill channel: 0.115 genuine traps arise per round and
     # the agent already takes 21 of 23.  Zero unless LQ_HERD=1.
     'opp_confine',     # 36  1 - (room the nearest opponent has, given I stand
-]                      #      on this destination) / HERD_CAP
+                       #      on this destination) / HERD_CAP
+    # --- stage 7: GAME PHASE.  Every feature above is local - how far is X from
+    # me, is this tile lethal.  Nothing says how far through the game we are, so
+    # the agent cannot tell "farm crates" from "the crates are gone, the only
+    # points left are kills".  A single shared weight vector averages the two
+    # regimes instead of switching between them.
+    #
+    # The phase enters ONLY as conjunctions.  A level (crates remaining, step
+    # count, opponents alive) is constant across the six actions, so it is
+    # absorbed into phi_state and cannot change the argmax - that is finding 3,
+    # and it is why d_coin and d_crate learned negative weights in stage 2.
+    'x_late_oppdelta', # 37  late x opp_delta     -> approach opponents, but only late
+    'x_late_bomb',     # 38  late x is_bomb       -> the value of bombing at all, by phase
+    'x_late_bombopp',  # 39  late x x_bomb_opp    -> the hunting bomb, by phase
+]
 N_FEATURES = len(FEATURE_NAMES)
 (BIAS, IS_WAIT, IS_INVALID, D_COIN, COIN_DELTA, NO_COIN,
  IS_BOMB, BOMB_READY, D_CRATE, CRATE_DELTA,
@@ -96,12 +110,23 @@ N_FEATURES = len(FEATURE_NAMES)
  X_DANGER_SAFETY, X_BOMB_NOESCAPE, X_BOMB_CRATES2, PHI_STATE,
  OPP_DELTA, OPP_IN_BLAST, X_BOMB_OPP, NO_OPP,
  OPP_TRAPPED, X_BOMB_TRAPPED,
- WINCOIN_DELTA, NO_WINCOIN, MYCRATE_DELTA, OPP_CONFINE) = range(N_FEATURES)
+ WINCOIN_DELTA, NO_WINCOIN, MYCRATE_DELTA, OPP_CONFINE,
+ X_LATE_OPPDELTA, X_LATE_BOMB, X_LATE_BOMBOPP) = range(N_FEATURES)
+
+# Game phase, off by default.  `late` runs 0 -> 1 as the crates are cleared;
+# CRATE_REF is the measured mean initial crate count on `classic` (122.9 over
+# 200 generated boards, sd 5.6), so late is 0 at the start and 1 on a bare
+# board.  Clipped, because a board can start with more crates than the mean.
+PHASE = _os.environ.get('LQ_PHASE', '0') != '0'
+CRATE_REF = float(_os.environ.get('LQ_CRATE_REF', '123'))
 
 # Herding, off by default.  The redundancy check that justified the shape of
 # this feature, and the horizon sweep that chose CAP = 60, are in
 # experiments/herd_probe.py; it disagrees with opp_delta on ~37% of the steps
 # where it has an opinion, and has any opinion at all on ~6% of steps.
+_ph = _os.environ.get('LQ_PHANTOM', '')
+PHANTOM = int(_ph) if _ph.strip() != '' else None
+
 HERD = _os.environ.get('LQ_HERD', '0') != '0'
 HERD_CAP = int(_os.environ.get('LQ_HERD_CAP', '60'))
 HERD_NEAR = int(_os.environ.get('LQ_HERD_NEAR', '8'))
@@ -289,9 +314,29 @@ def _danger_view(game_state, extra_bomb=None):
     decline to drop is cheaper than a death.
     """
     gs = game_state
+    extra = []
     if extra_bomb is not None:
+        extra.append((extra_bomb, BOMB_TIMER))
+
+    # PHANTOM BOMBS.  Our danger model only sees bombs that have already been
+    # dropped.  An opponent standing next to us can drop one on their turn, and
+    # by then we may already be inside a corridor it seals.  Measured: suicides
+    # are 0.010/round with only our own agents on the board and 0.377 with one
+    # rule_based_agent (section 14 config C vs A), so the deaths come from
+    # somebody ELSE's bomb, not from our own escape planning.
+    #
+    # LQ_PHANTOM=K assumes every opponent within K steps has just dropped one.
+    # Pessimistic by construction: it costs kills, because approaching an
+    # opponent now looks lethal.  Off by default; measured, not assumed.
+    if PHANTOM is not None:
+        _, _, _, me = gs['self']
+        for _, _, _, o in gs['others']:
+            if abs(o[0] - me[0]) + abs(o[1] - me[1]) <= PHANTOM:
+                extra.append((o, BOMB_TIMER))
+
+    if extra:
         gs = dict(game_state)
-        gs['bombs'] = list(game_state['bombs']) + [(extra_bomb, BOMB_TIMER)]
+        gs['bombs'] = list(game_state['bombs']) + extra
 
     lethal = danger_map(gs)
     free = gs['field'] == 0
@@ -371,6 +416,14 @@ def _context_uncached(game_state):
     ctx['d_to_opp'] = multi_source_bfs(others, free_of_agents) if others else None
     ctx['d_opp_here'] = (int(ctx['d_to_opp'][pos]) if others else UNREACHABLE)
     ctx['others'] = others
+
+    # Game phase: 0 at the start, 1 when the board is bare.  One count per
+    # step, shared by all six actions.
+    if PHASE:
+        ctx['late'] = float(np.clip(
+            1.0 - (game_state['field'] == 1).sum() / CRATE_REF, 0.0, 1.0))
+    else:
+        ctx['late'] = 0.0
 
     ctx['bomb_value'] = bomb_values(game_state['field'])
     bv = ctx['bomb_value']
@@ -538,6 +591,15 @@ def features(game_state, action, ctx=None):
 
     phi[X_BOMB_OPP] = phi[IS_BOMB] * phi[OPP_IN_BLAST]
     phi[X_BOMB_TRAPPED] = phi[IS_BOMB] * phi[OPP_TRAPPED]
+
+    # PHASE conjunctions.  Placed after their operands are final, and gated so
+    # the column is identically zero when LQ_PHASE is off - the shipped agent
+    # is then bit-identical.
+    if PHASE:
+        late = ctx['late']
+        phi[X_LATE_OPPDELTA] = late * phi[OPP_DELTA]
+        phi[X_LATE_BOMB]     = late * phi[IS_BOMB]
+        phi[X_LATE_BOMBOPP]  = late * phi[X_BOMB_OPP]
 
     # ---- offset column
     # Potential-based shaping is equivalent to initialising the value function

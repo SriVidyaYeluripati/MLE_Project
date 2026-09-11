@@ -1,0 +1,404 @@
+diff --git a/agent_code/model_linearQ/callbacks.py b/agent_code/model_linearQ/callbacks.py
+index 34f1f30..ac718ba 100644
+--- a/agent_code/model_linearQ/callbacks.py
++++ b/agent_code/model_linearQ/callbacks.py
+@@ -77,6 +77,8 @@ BOMBPROBE = os.environ.get('LQ_BOMBPROBE', '0') != '0'
+ COINTRACE = os.environ.get('LQ_COINTRACE', '0') != '0'
+ KILLTRACE = os.environ.get('LQ_KILLTRACE', '0') != '0'
+ HERDPROBE = os.environ.get('LQ_HERDPROBE', '0') != '0'
++PHASEPROBE = os.environ.get('LQ_PHASEPROBE', '0') != '0'
++_PSTAT = {'late': [], 'spread': [], 'n': 0, 'varies': 0}
+ _HSTAT = {}
+ _rf = os.environ.get('LQ_RACE_FILTER', '')
+ RACE_FILTER = int(_rf) if _rf.strip() != '' else None
+@@ -317,6 +319,34 @@ def act(self, game_state: dict) -> str:
+     if KILLTRACE:
+         _killtrace(self, ctx, phi, mask, ACTIONS[idx])
+ 
++    if PHASEPROBE:
++        try:
++            import json as _j
++            try:
++                from .features import X_LATE_OPPDELTA, X_LATE_BOMB, X_LATE_BOMBOPP
++            except ImportError:
++                from features import X_LATE_OPPDELTA, X_LATE_BOMB, X_LATE_BOMBOPP
++            st = _PSTAT
++            st['n'] += 1
++            st['late'].append(round(float(ctx.get('late', 0.0)), 3))
++            cols = phi[:, [X_LATE_OPPDELTA, X_LATE_BOMB, X_LATE_BOMBOPP]]
++            sp = float(cols.max(axis=0).max() - cols.min(axis=0).min())
++            st['spread'].append(round(sp, 3))
++            if sp > 1e-9:
++                st['varies'] += 1
++            if st['n'] % 500 == 0:
++                import numpy as _np
++                L = _np.array(st['late'])
++                _j.dump(dict(n=st['n'], varies=st['varies'],
++                             late_mean=float(L.mean()), late_p50=float(_np.median(L)),
++                             late_p90=float(_np.percentile(L, 90)), late_max=float(L.max()),
++                             frac_late_over_0_5=float((L > 0.5).mean()),
++                             frac_late_over_0_8=float((L > 0.8).mean())),
++                        open('/tmp/phaseprobe.json', 'w'), indent=1)
++        except Exception:
++            import traceback
++            open('/tmp/phaseprobe_err.txt', 'w').write(traceback.format_exc())
++
+     if HERDPROBE:
+         try:
+             _herdprobe(self, ctx, phi, ACTIONS[idx])
+diff --git a/agent_code/model_linearQ/features.py b/agent_code/model_linearQ/features.py
+index 54fcfb8..90bef80 100644
+--- a/agent_code/model_linearQ/features.py
++++ b/agent_code/model_linearQ/features.py
+@@ -86,7 +86,21 @@ FEATURE_NAMES = [
+     # constraint on the kill channel: 0.115 genuine traps arise per round and
+     # the agent already takes 21 of 23.  Zero unless LQ_HERD=1.
+     'opp_confine',     # 36  1 - (room the nearest opponent has, given I stand
+-]                      #      on this destination) / HERD_CAP
++                       #      on this destination) / HERD_CAP
++    # --- stage 7: GAME PHASE.  Every feature above is local - how far is X from
++    # me, is this tile lethal.  Nothing says how far through the game we are, so
++    # the agent cannot tell "farm crates" from "the crates are gone, the only
++    # points left are kills".  A single shared weight vector averages the two
++    # regimes instead of switching between them.
++    #
++    # The phase enters ONLY as conjunctions.  A level (crates remaining, step
++    # count, opponents alive) is constant across the six actions, so it is
++    # absorbed into phi_state and cannot change the argmax - that is finding 3,
++    # and it is why d_coin and d_crate learned negative weights in stage 2.
++    'x_late_oppdelta', # 37  late x opp_delta     -> approach opponents, but only late
++    'x_late_bomb',     # 38  late x is_bomb       -> the value of bombing at all, by phase
++    'x_late_bombopp',  # 39  late x x_bomb_opp    -> the hunting bomb, by phase
++]
+ N_FEATURES = len(FEATURE_NAMES)
+ (BIAS, IS_WAIT, IS_INVALID, D_COIN, COIN_DELTA, NO_COIN,
+  IS_BOMB, BOMB_READY, D_CRATE, CRATE_DELTA,
+@@ -96,12 +110,23 @@ N_FEATURES = len(FEATURE_NAMES)
+  X_DANGER_SAFETY, X_BOMB_NOESCAPE, X_BOMB_CRATES2, PHI_STATE,
+  OPP_DELTA, OPP_IN_BLAST, X_BOMB_OPP, NO_OPP,
+  OPP_TRAPPED, X_BOMB_TRAPPED,
+- WINCOIN_DELTA, NO_WINCOIN, MYCRATE_DELTA, OPP_CONFINE) = range(N_FEATURES)
++ WINCOIN_DELTA, NO_WINCOIN, MYCRATE_DELTA, OPP_CONFINE,
++ X_LATE_OPPDELTA, X_LATE_BOMB, X_LATE_BOMBOPP) = range(N_FEATURES)
++
++# Game phase, off by default.  `late` runs 0 -> 1 as the crates are cleared;
++# CRATE_REF is the measured mean initial crate count on `classic` (122.9 over
++# 200 generated boards, sd 5.6), so late is 0 at the start and 1 on a bare
++# board.  Clipped, because a board can start with more crates than the mean.
++PHASE = _os.environ.get('LQ_PHASE', '0') != '0'
++CRATE_REF = float(_os.environ.get('LQ_CRATE_REF', '123'))
+ 
+ # Herding, off by default.  The redundancy check that justified the shape of
+ # this feature, and the horizon sweep that chose CAP = 60, are in
+ # experiments/herd_probe.py; it disagrees with opp_delta on ~37% of the steps
+ # where it has an opinion, and has any opinion at all on ~6% of steps.
++_ph = _os.environ.get('LQ_PHANTOM', '')
++PHANTOM = int(_ph) if _ph.strip() != '' else None
++
+ HERD = _os.environ.get('LQ_HERD', '0') != '0'
+ HERD_CAP = int(_os.environ.get('LQ_HERD_CAP', '60'))
+ HERD_NEAR = int(_os.environ.get('LQ_HERD_NEAR', '8'))
+@@ -289,9 +314,29 @@ def _danger_view(game_state, extra_bomb=None):
+     decline to drop is cheaper than a death.
+     """
+     gs = game_state
++    extra = []
+     if extra_bomb is not None:
++        extra.append((extra_bomb, BOMB_TIMER))
++
++    # PHANTOM BOMBS.  Our danger model only sees bombs that have already been
++    # dropped.  An opponent standing next to us can drop one on their turn, and
++    # by then we may already be inside a corridor it seals.  Measured: suicides
++    # are 0.010/round with only our own agents on the board and 0.377 with one
++    # rule_based_agent (section 14 config C vs A), so the deaths come from
++    # somebody ELSE's bomb, not from our own escape planning.
++    #
++    # LQ_PHANTOM=K assumes every opponent within K steps has just dropped one.
++    # Pessimistic by construction: it costs kills, because approaching an
++    # opponent now looks lethal.  Off by default; measured, not assumed.
++    if PHANTOM is not None:
++        _, _, _, me = gs['self']
++        for _, _, _, o in gs['others']:
++            if abs(o[0] - me[0]) + abs(o[1] - me[1]) <= PHANTOM:
++                extra.append((o, BOMB_TIMER))
++
++    if extra:
+         gs = dict(game_state)
+-        gs['bombs'] = list(game_state['bombs']) + [(extra_bomb, BOMB_TIMER)]
++        gs['bombs'] = list(game_state['bombs']) + extra
+ 
+     lethal = danger_map(gs)
+     free = gs['field'] == 0
+@@ -372,6 +417,14 @@ def _context_uncached(game_state):
+     ctx['d_opp_here'] = (int(ctx['d_to_opp'][pos]) if others else UNREACHABLE)
+     ctx['others'] = others
+ 
++    # Game phase: 0 at the start, 1 when the board is bare.  One count per
++    # step, shared by all six actions.
++    if PHASE:
++        ctx['late'] = float(np.clip(
++            1.0 - (game_state['field'] == 1).sum() / CRATE_REF, 0.0, 1.0))
++    else:
++        ctx['late'] = 0.0
++
+     ctx['bomb_value'] = bomb_values(game_state['field'])
+     bv = ctx['bomb_value']
+     if BOMB_TARGET_SLACK is None:
+@@ -539,6 +592,15 @@ def features(game_state, action, ctx=None):
+     phi[X_BOMB_OPP] = phi[IS_BOMB] * phi[OPP_IN_BLAST]
+     phi[X_BOMB_TRAPPED] = phi[IS_BOMB] * phi[OPP_TRAPPED]
+ 
++    # PHASE conjunctions.  Placed after their operands are final, and gated so
++    # the column is identically zero when LQ_PHASE is off - the shipped agent
++    # is then bit-identical.
++    if PHASE:
++        late = ctx['late']
++        phi[X_LATE_OPPDELTA] = late * phi[OPP_DELTA]
++        phi[X_LATE_BOMB]     = late * phi[IS_BOMB]
++        phi[X_LATE_BOMBOPP]  = late * phi[X_BOMB_OPP]
++
+     # ---- offset column
+     # Potential-based shaping is equivalent to initialising the value function
+     # to Phi, so what the learner ends up representing is Q*(s,a) - Phi(s).
+diff --git a/exp_report.py b/exp_report.py
+index 3dfe350..392b191 100644
+--- a/exp_report.py
++++ b/exp_report.py
+@@ -55,6 +55,19 @@ if sys.argv[1] == 'gamma':
+     if ok2: print(f"\n  (g80 minus g95, score {d2['score'].mean():+.3f} "
+                   f"-- intermediate point, NOT a test)")
+ 
++elif sys.argv[1] == 'phase':
++    S = list(range(1, 41))
++    a = [load('phase','pbase',s) for s in S]; b = [load('phase','pphase',s) for s in S]
++    ok, d = paired(a, b, KEYS, S)
++    print(f"\n=== GAME PHASE ===  complete pairs: {len(ok)}/40   (vs 3x rule_based_agent)")
++    if len(ok) < 3: print("not enough paired seeds yet"); sys.exit()
++    crit = stats.t.ppf(.95, len(ok)-1)
++    print(f"PRIMARY: score, ONE-sided, t > {crit:.3f} at df={len(ok)-1}")
++    if len(ok) < 40:
++        print(f"  NOTE: {len(ok)} of the pre-registered 40 -- incomplete, "
++              f"detects {2.8*d['score'].std(ddof=1)/np.sqrt(len(ok)):+.3f} score at 80% power")
++    for k in KEYS: line(k, d[k], crit, one=True, primary=(k == 'score'))
++
+ elif sys.argv[1] == 'herd':
+     S = list(range(1, 41))
+     a = [load('herd','hbase',s) for s in S]; b = [load('herd','hherd',s) for s in S]
+diff --git a/experiments/PREREG_phase.md b/experiments/PREREG_phase.md
+new file mode 100644
+index 0000000..e6f65c4
+--- /dev/null
++++ b/experiments/PREREG_phase.md
+@@ -0,0 +1,151 @@
++# Pre-registration — does giving the agent the game phase raise its score?
++
++Written **before** any training run.
++
++## The gap this targets
++
++Against `rule_based_agent` in the mixed four-player field (section 14, config A,
++300 rounds):
++
++| | LinQ | rule_based | share of the 2.61 gap |
++|---|---|---|---|
++| coins | 3.66 | 4.08 | 0.42 |
++| **kills** | **0.223** | **0.660** | **2.19 (84%)** |
++
++**84% of the deficit is kills.** And LinQ is not incapable of killing: against
++three `peaceful_agent`s it makes **0.900 kills per round**. It kills when it
++hunts. In the mixed field it drops to 0.22 because it spends the round bombing
++crates instead.
++
++This corrects the section-13 statement that "the kill channel is closed". That
++was established against `coin_collector_agent`, which never lingers. It is not
++established against weak opponents generally, and `rule_based_agent` is
++harvesting exactly those kills.
++
++## What is missing, and why it is a representational gap rather than a tuning one
++
++All 37 existing features are **local** - how far is X from me, is this tile
++lethal, does this bomb hit a crate. None says how far through the game we are.
++
++The winning policy has two regimes. Early: farm crates, because the coins are
++locked inside them. Late: the crates are gone, so the only points left are
++kills. A single shared weight vector **averages the two regimes instead of
++switching between them.**
++
++## The feature, and exactly what it buys
++
++`late = clip(1 - crates_remaining / 123, 0, 1)`, where 123 is the measured mean
++initial crate count on `classic` (200 generated boards, sd 5.6). 0 at the start,
++1 on a bare board.
++
++Three columns, all conjunctions, **no levels**:
++
++| | |
++|---|---|
++| `x_late_oppdelta` | `late * opp_delta` |
++| `x_late_bomb` | `late * is_bomb` |
++| `x_late_bombopp` | `late * x_bomb_opp` |
++
++**The levels are deliberately omitted.** A phase level is constant across the
++six actions, so it is absorbed into `phi_state` and cannot change the argmax -
++that is finding 3, and it is why `d_coin` and `d_crate` learned negative weights
++in stage 2.
++
++**And the conjunction does not reorder actions within a step either.** `late` is
++constant across the six actions, so `late * opp_delta` ranks them exactly as
++`opp_delta` does. What it adds is this:
++
++    Q contribution = w_opp*opp_delta + w_late*(late*opp_delta)
++                   = (w_opp + w_late*late) * opp_delta
++
++The **effective weight on `opp_delta` becomes a linear function of phase.** That
++is a regime switch, and one weight vector provably cannot express it without the
++conjunction. This is the entire mechanism, stated before the run so it cannot be
++reinvented afterwards.
++
++## The density check, run before this document
++
++80 rounds vs three `rule_based_agent`s, 22,500 decisions:
++
++| | |
++|---|---|
++| `late`, mean | 0.785 |
++| `late`, median | 0.894 |
++| steps with `late` > 0.5 | **85%** |
++| steps with `late` > 0.8 | **67%** |
++| steps where the three columns are non-zero | **99%** (22,270 / 22,500) |
++
++The late regime is not rare - it is most of the game. Four agents clear the
++crates quickly, and the agent spends two-thirds of its steps on a board that is
++over 80% cleared. **This is by far the densest feature added in this project:**
++the herding feature had an opinion on 6% of steps, the coin-approach signal on
++10%, genuine traps on 0.03%.
++
++Density cuts both ways and that is stated now: because `late` sits near 0.78 on
++average, the conjunction is close to a rescaled `opp_delta` most of the time,
++and the learner can partly imitate it by reweighting `opp_delta`. The
++information is in the **variation** of `late`, not its level.
++
++## Arms, metric and rule — fixed now
++
++Two arms, **forty seeds each**, seeds 7001-7040, paired by seed. Warm start from
++`weights.npz` (new columns pad to zero), `LQ_BOMB_COST=0 LQ_CRATE_VALUE=0.02`,
++600 rounds on `classic` vs three `peaceful_agent`s.
++
++| tag | switch |
++|---|---|
++| `pbase` | none - the three columns stay identically zero |
++| `pphase` | `LQ_PHASE=1` at train **and** eval |
++
++**Evaluation is different from every previous experiment here, deliberately.**
++Earlier runs evaluated against three `coin_collector_agent`s. The hypothesis is
++about hunting weak opponents, and `coin_collector` never lingers, so that
++protocol cannot see the effect. Evaluation is **300 rounds against three
++`rule_based_agent`s**, which is also the configuration the gap was measured in.
++
++**Primary metric: score per round.** Not kills. The claim is that the agent
++re-allocates effort between two channels, so the thing to measure is the total,
++not one channel - and measuring kills alone would reward a change that trades
++coins for kills at a loss.
++
++**Decision rule:** paired by seed, one-sided `t > 1.685` (alpha = .05, df = 39).
++One-sided because the mechanism predicts a direction. Anything else is a null.
++
++Secondary, reported and claimed only if the primary passes: kills, coins,
++suicides.
++
++## Power, from variances measured for their own sake
++
++From the n=40 herding run: paired score sd **0.731**, kills sd **0.041**.
++
++| effect on score | power at n=40 |
++|---|---|
++| +0.20 | 42% |
++| +0.33 | 80% |
++| +0.50 | 98% |
++
++n = 40 detects **+0.33 score** at 80% power. The gap to close is 2.61, and the
++kill component alone is 2.19, so an intervention that works at all should clear
++this comfortably. **If the true effect is below +0.33 this test will probably
++miss it**, and that is the stated limitation.
++
++## My prior, written down now
++
++**About 35%** that this produces a measurable score gain. Higher than the 20% I
++gave herding, for three reasons: the columns are active on 99% of steps rather
++than 6%; the mechanism is a regime switch the model provably cannot otherwise
++express; and it is aimed at the 84% of the gap rather than at a symptom.
++
++Lower than 50% because eight consecutive interventions in this project have been
++null, and because `late` is high most of the time, so much of what the
++conjunction expresses can be imitated by reweighting `opp_delta`.
++
++**No guarantee is offered or implied.** The honest summary is: this is the best
++remaining idea, and it is more likely to fail than to succeed.
++
++## What would make this worthless
++
++- Extending past n = 40, or stopping early, after looking at any result.
++- Reporting kills or coins as the finding if score says nothing.
++- Switching the evaluation opponent after seeing the result.
++- Quietly dropping the 35% prior if the answer comes out positive.
+diff --git a/run_experiments.sh b/run_experiments.sh
+index 5103ec9..61be254 100755
+--- a/run_experiments.sh
++++ b/run_experiments.sh
+@@ -12,29 +12,33 @@ set -u
+ R="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; cd "$R"
+ export A=agent_code/model_linearQ
+ JOBS="${JOBS:-$(nproc)}"
+-mkdir -p .exp_done results/gamma results/herd logs
++PHASE_SEED_BASE=5000
++case "${1:-both}" in phase) PHASE_SEED_BASE=7000 ;; esac
++mkdir -p .exp_done results/gamma results/herd results/phase logs
+ 
+ train_one() {                       # "<tag> <seed> <exp>"
+   set -- $1; local tag=$1 s=$2 exp=$3 sw=""
+   case "$tag" in g80) sw="LQ_GAMMA=0.80";; g60) sw="LQ_GAMMA=0.60";;
+-                 hherd) sw="LQ_HERD=1";; esac
++                 hherd) sw="LQ_HERD=1";; pphase) sw="LQ_PHASE=1";; esac
+   local m=.exp_done/train_$tag$s
+   [ -f "$m" ] && [ -f "$A/w_$tag$s.npz" ] && { echo "skip  train $tag$s"; return; }
+   rm -f "$A/w_$tag$s.npz"; cp "$A/weights.npz" "$A/w_$tag$s.npz"
+   env LQ_WEIGHTS=w_$tag$s.npz LQ_BOMB_COST=0 LQ_CRATE_VALUE=0.02 $sw \
+     python main.py play --no-gui \
+     --agents model_linearQ peaceful_agent peaceful_agent peaceful_agent \
+-    --train 1 --scenario classic --n-rounds 600 --seed $((5000+s)) >/dev/null 2>&1 \
++    --train 1 --scenario classic --n-rounds 600 --seed $((PHASE_SEED_BASE+s)) >/dev/null 2>&1 \
+     && touch "$m" && echo "train $tag$s done $(date +%H:%M)"
+ }
+ eval_one() {                        # "<tag> <seed> <exp>"
+   set -- $1; local tag=$1 s=$2 exp=$3 sw=""
+   case "$tag" in g80) sw="LQ_GAMMA=0.80";; g60) sw="LQ_GAMMA=0.60";;
+-                 hherd) sw="LQ_HERD=1";; esac
++                 hherd) sw="LQ_HERD=1";; pphase) sw="LQ_PHASE=1";; esac
+   local m=.exp_done/eval_$tag$s
+   [ -f "$m" ] && [ -s "results/$exp/$tag$s.json" ] && { echo "skip  eval $tag$s"; return; }
++  local opp=coin_collector_agent
++  [ "$exp" = phase ] && opp=rule_based_agent      # see PREREG_phase.md
+   env LQ_WEIGHTS=w_$tag$s.npz $sw python main.py play --no-gui \
+-    --agents model_linearQ coin_collector_agent coin_collector_agent coin_collector_agent \
++    --agents model_linearQ $opp $opp $opp \
+     --scenario classic --n-rounds 300 --save-stats results/$exp/$tag$s.json >/dev/null 2>&1 \
+     && touch "$m" && echo "eval  $tag$s done $(date +%H:%M)"
+ }
+@@ -42,6 +46,7 @@ export -f train_one eval_one
+ 
+ jobs_gamma(){ for s in $(seq 1 12);  do for t in g95 g80 g60; do echo "$t $s gamma"; done; done; }
+ jobs_herd(){  for s in $(seq 1 40);  do for t in hbase hherd;  do echo "$t $s herd";  done; done; }
++jobs_phase(){ for s in $(seq 1 40);  do for t in pbase pphase; do echo "$t $s phase"; done; done; }
+ 
+ phase(){ local name=$1 lister=$2 n
+   n=$($lister | wc -l)
+@@ -54,7 +59,8 @@ phase(){ local name=$1 lister=$2 n
+ case "${1:-both}" in
+   gamma) phase GAMMA jobs_gamma; python3 exp_report.py gamma ;;
+   herd)  phase HERD  jobs_herd;  python3 exp_report.py herd ;;
++  phase) phase PHASE jobs_phase; python3 exp_report.py phase ;;
+   both)  phase GAMMA jobs_gamma; python3 exp_report.py gamma
+          phase HERD  jobs_herd;  python3 exp_report.py herd ;;
+-  *) echo "usage: bash run_experiments.sh [gamma|herd|both]"; exit 1 ;;
++  *) echo "usage: bash run_experiments.sh [gamma|herd|phase|both]"; exit 1 ;;
+ esac

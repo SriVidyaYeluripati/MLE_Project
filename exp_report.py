@@ -55,6 +55,19 @@ if sys.argv[1] == 'gamma':
     if ok2: print(f"\n  (g80 minus g95, score {d2['score'].mean():+.3f} "
                   f"-- intermediate point, NOT a test)")
 
+elif sys.argv[1] == 'phase':
+    S = list(range(1, 41))
+    a = [load('phase','pbase',s) for s in S]; b = [load('phase','pphase',s) for s in S]
+    ok, d = paired(a, b, KEYS, S)
+    print(f"\n=== GAME PHASE ===  complete pairs: {len(ok)}/40   (vs 3x rule_based_agent)")
+    if len(ok) < 3: print("not enough paired seeds yet"); sys.exit()
+    crit = stats.t.ppf(.95, len(ok)-1)
+    print(f"PRIMARY: score, ONE-sided, t > {crit:.3f} at df={len(ok)-1}")
+    if len(ok) < 40:
+        print(f"  NOTE: {len(ok)} of the pre-registered 40 -- incomplete, "
+              f"detects {2.8*d['score'].std(ddof=1)/np.sqrt(len(ok)):+.3f} score at 80% power")
+    for k in KEYS: line(k, d[k], crit, one=True, primary=(k == 'score'))
+
 elif sys.argv[1] == 'herd':
     S = list(range(1, 41))
     a = [load('herd','hbase',s) for s in S]; b = [load('herd','hherd',s) for s in S]
