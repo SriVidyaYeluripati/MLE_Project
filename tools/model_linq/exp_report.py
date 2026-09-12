@@ -5,7 +5,7 @@ import json, os, sys, numpy as np
 from scipy import stats
 
 def load(exp, tag, s):
-    f = f'linq/results/{exp}/{tag}{s}.json'
+    f = f'results/model_linq/{exp}/{tag}{s}.json'
     if not os.path.exists(f): return None
     d = json.load(open(f))['by_agent']; me = d['model_linearQ']; n = me['rounds']
     if not n: return None

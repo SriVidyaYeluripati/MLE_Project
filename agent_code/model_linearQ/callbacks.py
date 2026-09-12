@@ -447,7 +447,7 @@ def _herdprobe(self, ctx, phi, chosen):
     the two cannot drift apart.
     """
     import json, sys, os as _o
-    sys.path.insert(0, _o.path.join(_o.path.dirname(__file__), '..', '..', 'experiments'))
+    sys.path.insert(0, _o.path.join(_o.path.dirname(__file__), '..', '..', '..', 'experiments', 'model_linq'))
     from herd_probe import confine, NEAR
     try:
         from .features import OPP_DELTA, EXITS, afterstate

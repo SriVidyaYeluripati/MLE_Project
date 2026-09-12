@@ -1,7 +1,7 @@
 import json,os,sys,numpy as np
 from math import sqrt
 def load(t):
-    f=f'linq/results/trapc/{t}.json'
+    f=f'results/model_linq/trapc/{t}.json'
     if not os.path.exists(f): return None
     d=json.load(open(f))['by_agent']; me=d['model_linearQ']; n=me['rounds']
     g=lambda k: me.get(k,0)/n

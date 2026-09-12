@@ -9,18 +9,18 @@
 # Safe to re-run after any interruption: a step is skipped only when its
 # marker AND its output file are both present.
 set -u
-R="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$R"
+R="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$R"
 export A=agent_code/model_linearQ
 JOBS="${JOBS:-$(nproc)}"
 PHASE_SEED_BASE=5000
 case "${1:-both}" in phase) PHASE_SEED_BASE=7000 ;; esac
-mkdir -p linq/.exp_done linq/results/gamma linq/results/herd linq/results/phase logs
+mkdir -p results/model_linq/.done results/model_linq/gamma results/model_linq/herd results/model_linq/phase logs
 
 train_one() {                       # "<tag> <seed> <exp>"
   set -- $1; local tag=$1 s=$2 exp=$3 sw=""
   case "$tag" in g80) sw="LQ_GAMMA=0.80";; g60) sw="LQ_GAMMA=0.60";;
                  hherd) sw="LQ_HERD=1";; pphase) sw="LQ_PHASE=1";; esac
-  local m=linq/.exp_done/train_$tag$s
+  local m=results/model_linq/.done/train_$tag$s
   [ -f "$m" ] && [ -f "$A/w_$tag$s.npz" ] && { echo "skip  train $tag$s"; return; }
   rm -f "$A/w_$tag$s.npz"; cp "$A/weights.npz" "$A/w_$tag$s.npz"
   env LQ_WEIGHTS=w_$tag$s.npz LQ_BOMB_COST=0 LQ_CRATE_VALUE=0.02 $sw \
@@ -33,13 +33,13 @@ eval_one() {                        # "<tag> <seed> <exp>"
   set -- $1; local tag=$1 s=$2 exp=$3 sw=""
   case "$tag" in g80) sw="LQ_GAMMA=0.80";; g60) sw="LQ_GAMMA=0.60";;
                  hherd) sw="LQ_HERD=1";; pphase) sw="LQ_PHASE=1";; esac
-  local m=linq/.exp_done/eval_$tag$s
-  [ -f "$m" ] && [ -s "linq/results/$exp/$tag$s.json" ] && { echo "skip  eval $tag$s"; return; }
+  local m=results/model_linq/.done/eval_$tag$s
+  [ -f "$m" ] && [ -s "results/model_linq/$exp/$tag$s.json" ] && { echo "skip  eval $tag$s"; return; }
   local opp=coin_collector_agent
   [ "$exp" = phase ] && opp=rule_based_agent      # see PREREG_phase.md
   env LQ_WEIGHTS=w_$tag$s.npz $sw python main.py play --no-gui \
     --agents model_linearQ $opp $opp $opp \
-    --scenario classic --n-rounds 300 --save-stats linq/results/$exp/$tag$s.json >/dev/null 2>&1 \
+    --scenario classic --n-rounds 300 --save-stats results/model_linq/$exp/$tag$s.json >/dev/null 2>&1 \
     && touch "$m" && echo "eval  $tag$s done $(date +%H:%M)"
 }
 export -f train_one eval_one
@@ -57,10 +57,10 @@ phase(){ local name=$1 lister=$2 n
 }
 
 case "${1:-both}" in
-  gamma) phase GAMMA jobs_gamma; python3 linq/exp_report.py gamma ;;
-  herd)  phase HERD  jobs_herd;  python3 linq/exp_report.py herd ;;
-  phase) phase PHASE jobs_phase; python3 linq/exp_report.py phase ;;
-  both)  phase GAMMA jobs_gamma; python3 linq/exp_report.py gamma
-         phase HERD  jobs_herd;  python3 linq/exp_report.py herd ;;
+  gamma) phase GAMMA jobs_gamma; python3 tools/model_linq/exp_report.py gamma ;;
+  herd)  phase HERD  jobs_herd;  python3 tools/model_linq/exp_report.py herd ;;
+  phase) phase PHASE jobs_phase; python3 tools/model_linq/exp_report.py phase ;;
+  both)  phase GAMMA jobs_gamma; python3 tools/model_linq/exp_report.py gamma
+         phase HERD  jobs_herd;  python3 tools/model_linq/exp_report.py herd ;;
   *) echo "usage: bash run_experiments.sh [gamma|herd|phase|both]"; exit 1 ;;
 esac
