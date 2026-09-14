@@ -13,13 +13,13 @@ from .features import N_FEATURES
 GAMMA = 0.9
 BUFFER_SIZE = 20_000
 REFIT_EVERY = 20
-N_ESTIMATORS = 60
+N_ESTIMATORS_STEP = 15
 MAX_DEPTH = 3
 LEARNING_RATE = 0.1
 MIN_SAMPLES = 500
 EPS_START = 1.0
 EPS_END = 0.05
-EPS_DECAY_ROUNDS = 1500
+EPS_DECAY_ROUNDS = 3000
 USE_SYMMETRY = True
 
 DIR_BLOCKS = [0, 4, 8, 12, 17, 24]
@@ -44,9 +44,13 @@ def _permute(features, action_idx, rot, mirror):
 
 def setup_training(self):
     self.buffer = deque(maxlen=BUFFER_SIZE)
-    self.round_count = 0
-    self.epsilon = EPS_START
-    self.logger.info(f"Model GBT training: {N_FEATURES} features, search={USE_SEARCH}, symmetry={USE_SYMMETRY}.")
+    if getattr(self, "round_count", None) is not None:
+        self.epsilon = self.epsilon_saved if self.epsilon_saved is not None else EPS_START
+    else:
+        self.round_count = 0
+        self.epsilon = EPS_START
+    self.logger.info(f"Model GBT training: {N_FEATURES} features, search={USE_SEARCH}, "
+                     f"symmetry={USE_SYMMETRY}, resuming_at_round={self.round_count}, eps={self.epsilon:.3f}.")
 
 
 def _record(self, old_state, action, new_state, reward):
@@ -63,12 +67,12 @@ def _record(self, old_state, action, new_state, reward):
 
 
 def game_events_occurred(self, old_game_state, self_action, new_game_state, events):
-    reward = reward_from_events(self, events) + bomb_safety_bonus(old_game_state, self_action)
+    reward = reward_from_events(self, events) + bomb_safety_bonus(old_game_state, self_action) + escape_shaping(old_game_state, self_action)
     _record(self, old_game_state, self_action, new_game_state, reward)
 
 
 def end_of_round(self, last_game_state, last_action, events):
-    reward = reward_from_events(self, events) + bomb_safety_bonus(last_game_state, last_action)
+    reward = reward_from_events(self, events) + bomb_safety_bonus(last_game_state, last_action) + escape_shaping(last_game_state, last_action)
     _record(self, last_game_state, last_action, None, reward)
 
     self.round_count += 1
@@ -78,7 +82,7 @@ def end_of_round(self, last_game_state, last_action, events):
     if self.round_count % REFIT_EVERY == 0 and len(self.buffer) >= MIN_SAMPLES:
         _refit(self)
         with open(MODEL_FILE, "wb") as f:
-            pickle.dump(self.model, f)
+            pickle.dump({"model": self.model, "round_count": self.round_count, "epsilon": self.epsilon}, f)
         self.logger.info(f"Refit @ round {self.round_count}: {len(self.buffer)} transitions, eps={self.epsilon:.3f}")
 
 
@@ -88,17 +92,25 @@ def bomb_safety_bonus(game_state, action):
     f = state_to_features(game_state)
     if f is None:
         return 0.0
-    return 2.0 if f[23] else -3.0
+    n_routes = int(f[17:21].sum()) if f[23] else 0
+    if n_routes < 2:
+        return -3.0
+    return 0.5 * n_routes
 
-    self.round_count += 1
-    frac = min(1.0, self.round_count / EPS_DECAY_ROUNDS)
-    self.epsilon = EPS_START + frac * (EPS_END - EPS_START)
 
-    if self.round_count % REFIT_EVERY == 0 and len(self.buffer) >= MIN_SAMPLES:
-        _refit(self)
-        with open(MODEL_FILE, "wb") as f:
-            pickle.dump(self.model, f)
-        self.logger.info(f"Refit @ round {self.round_count}: {len(self.buffer)} transitions, eps={self.epsilon:.3f}")
+def escape_shaping(game_state, action):
+    if game_state is None:
+        return 0.0
+    f = state_to_features(game_state)
+    if f is None or f[16] != 1:
+        return 0.0
+    escape = f[17:21]
+    action_idx = {"UP": 0, "RIGHT": 1, "DOWN": 2, "LEFT": 3}.get(action)
+    if action_idx is None:
+        return -0.3 if escape.any() else 0.0
+    if escape[action_idx]:
+        return 0.5
+    return -0.5 if escape.any() else 0.0
 
 
 def _refit(self):
@@ -116,22 +128,26 @@ def _refit(self):
 
     Y = R + GAMMA * future
 
-    new_model = []
+    if self.model is None:
+        self.model = [_fresh_regressor() for _ in range(len(ACTIONS))]
+        for reg in self.model:
+            reg.fit(np.zeros((1, N_FEATURES)), [0.0])
+
     for a in range(len(ACTIONS)):
         mask = A == a
         if mask.sum() < 10:
-            reg = _fresh_regressor().fit(np.zeros((1, N_FEATURES)), [0.0])
-        else:
-            reg = _fresh_regressor().fit(S[mask], Y[mask])
-        new_model.append(reg)
-    self.model = new_model
+            continue
+        reg = self.model[a]
+        reg.n_estimators += N_ESTIMATORS_STEP
+        reg.fit(S[mask], Y[mask])
 
 
 def _fresh_regressor():
     return GradientBoostingRegressor(
-        n_estimators=N_ESTIMATORS,
+        n_estimators=N_ESTIMATORS_STEP,
         max_depth=MAX_DEPTH,
         learning_rate=LEARNING_RATE,
+        warm_start=True,
         random_state=0,
     )
 

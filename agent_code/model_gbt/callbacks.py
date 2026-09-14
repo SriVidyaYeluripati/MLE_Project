@@ -24,10 +24,18 @@ def state_to_features(game_state):
 
 def setup(self):
     self.n_features = N_FEATURES
+    self.round_count = None
+    self.epsilon_saved = None
     if os.path.isfile(MODEL_FILE):
         with open(MODEL_FILE, "rb") as file:
-            self.model = pickle.load(file)
-        self.logger.info(f"Loaded Model GBT from disk (search={USE_SEARCH}).")
+            saved = pickle.load(file)
+        if isinstance(saved, dict):
+            self.model = saved["model"]
+            self.round_count = saved.get("round_count")
+            self.epsilon_saved = saved.get("epsilon")
+        else:
+            self.model = saved
+        self.logger.info(f"Loaded Model GBT from disk (search={USE_SEARCH}, round_count={self.round_count}).")
     else:
         self.model = None
         self.logger.info(f"No saved model found, starting from scratch (search={USE_SEARCH}).")
