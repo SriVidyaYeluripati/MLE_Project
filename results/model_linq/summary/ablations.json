@@ -1,0 +1,144 @@
+{
+  "agent": "model_linearQ",
+  "model": "Model LinQ (linear Q, Expected SARSA(lambda))",
+  "id": "ablations",
+  "title": "Feature-group ablations",
+  "section": "build log 5",
+  "question": "Which feature groups actually carry the policy?",
+  "design": {
+    "arms": [
+      "full",
+      "no_escape",
+      "no_shaping",
+      "no_conj",
+      "no_opp",
+      "no_danger",
+      "no_mask"
+    ],
+    "n": 3,
+    "repeats_per_arm": 3,
+    "total_trainings": 21,
+    "paired": false,
+    "primary_metric": "margin",
+    "protocol": "trained from scratch: 400 rounds solo on classic, then 300 vs 3x peaceful_agent; evaluated over 200 tournament rounds with learning off",
+    "decision_rule": "baseline spread +-0.19 over three runs, so |delta| > 0.38 counts"
+  },
+  "raw_runs": "results/model_linq/ablation/",
+  "arms": [
+    {
+      "arm": "full",
+      "margin": 0.4,
+      "margin_range": [
+        0.18,
+        0.52
+      ],
+      "delta": null,
+      "score": 3.27,
+      "coins": 2.67,
+      "kills": 0.12,
+      "crates": 27.56,
+      "suicides": 0.28,
+      "invalid": 0.28,
+      "alive": 335.3
+    },
+    {
+      "arm": "no_escape",
+      "margin": -4.9,
+      "margin_range": [
+        -5.22,
+        -4.63
+      ],
+      "delta": -5.3,
+      "score": 0.02,
+      "coins": 0.02,
+      "kills": 0.0,
+      "crates": 0.51,
+      "suicides": 0.18,
+      "invalid": 0.74,
+      "alive": 187.6
+    },
+    {
+      "arm": "no_shaping",
+      "margin": -3.89,
+      "margin_range": [
+        -4.0,
+        -3.67
+      ],
+      "delta": -4.29,
+      "score": 0.01,
+      "coins": 0.01,
+      "kills": 0.0,
+      "crates": 0.0,
+      "suicides": 0.01,
+      "invalid": 2.11,
+      "alive": 350.7
+    },
+    {
+      "arm": "no_conj",
+      "margin": -1.05,
+      "margin_range": [
+        -4.27,
+        1.0
+      ],
+      "delta": -1.45,
+      "score": 2.23,
+      "coins": 1.92,
+      "kills": 0.06,
+      "crates": 18.79,
+      "suicides": 0.22,
+      "invalid": 0.44,
+      "alive": 314.5
+    },
+    {
+      "arm": "no_opp",
+      "margin": 0.72,
+      "margin_range": [
+        0.28,
+        1.02
+      ],
+      "delta": 0.32,
+      "score": 3.61,
+      "coins": 2.9,
+      "kills": 0.14,
+      "crates": 30.69,
+      "suicides": 0.44,
+      "invalid": 1.02,
+      "alive": 286.8
+    },
+    {
+      "arm": "no_danger",
+      "margin": 0.67,
+      "margin_range": [
+        0.15,
+        1.31
+      ],
+      "delta": 0.27,
+      "score": 3.54,
+      "coins": 2.69,
+      "kills": 0.17,
+      "crates": 30.89,
+      "suicides": 0.3,
+      "invalid": 0.84,
+      "alive": 331.9
+    },
+    {
+      "arm": "no_mask",
+      "margin": 0.3,
+      "margin_range": [
+        -0.17,
+        0.79
+      ],
+      "delta": -0.1,
+      "score": 3.17,
+      "coins": 2.55,
+      "kills": 0.12,
+      "crates": 32.39,
+      "suicides": 0.2,
+      "invalid": 0.54,
+      "alive": 355.9
+    }
+  ],
+  "verdict": "two groups load-bearing",
+  "caveat": "The trapped and conj rows are contaminated: x_bomb_opp is an identical column to opp_in_blast and x_bomb_trapped to opp_trapped (see kill_channel), so those ablations do not measure what their names say. escape, shaping, danger, coins, crates and opp are unaffected.",
+  "conclusion": "Survival (no_escape, -5.30) and potential-based shaping (no_shaping, -4.29) are the only groups whose removal clears the noise floor. Opponent and danger features can be deleted with no measurable loss."
+}
