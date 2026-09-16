@@ -1,0 +1,271 @@
+"""
+Imported only when training.   Expected SARSA(lambda) with linear features.
+
+Why Expected SARSA rather than Q-learning: its target contains no max, so it
+carries no maximisation bias at all, and it is on-policy, which is the family
+that does not diverge the way Q-learning with linear function approximation can.
+Both properties come free here, because act() has already computed all the
+action values we need.
+"""
+
+import os
+from collections import defaultdict
+from typing import List
+
+import numpy as np
+
+import events as e
+
+try:
+    from .callbacks import action_probabilities, legal_mask, model_path
+    from .features import (ACTIONS, N_FEATURES, FEATURE_NAMES, feature_matrix,
+                           features, context, potential, describe)
+except ImportError:
+    from callbacks import action_probabilities, legal_mask, model_path
+    from features import (ACTIONS, N_FEATURES, FEATURE_NAMES, feature_matrix,
+                          features, context, potential, describe)
+
+# ---------------------------------------------------------------- hyperparameters
+# nickstr15 ("Maverick", Heidelberg WS20/21) report that gamma = 0.85 produced
+# endless movement loops and gamma = 0.6 fixed them, on a 23-feature agent.
+# Their argument: with features too weak to express the true remaining return,
+# the best linear fit to a long-horizon target is degenerate, so shrink the
+# horizon to what the features can actually see. LQ_GAMMA makes that testable.
+GAMMA = float(os.environ.get('LQ_GAMMA', '0.95'))   # 1/(1-gamma) = 20 steps
+LAMBDA = float(os.environ.get('LQ_LAMBDA', 0.80))
+                    # credit assignment AND one leg of the deadly triad. Ablate
+                    # to 0.0 for one-step Expected SARSA.
+ALPHA = float(os.environ.get('LQ_ALPHA', 0.01))
+                    # normalised by ||phi||^2 below.  Switchable because a
+                    # CONSTANT step size cannot track a non-stationary target:
+                    # when the opponent's behaviour shifts, the fitted values go
+                    # stale and a fixed alpha has no mechanism to forget them.
+                    # That is the documented cause of finding 5.
+USE_SHAPING = os.environ.get('LQ_SHAPING', '1') != '0'
+                    # see the note below: with LEVEL features present, the state
+                    # potential duplicates them and distorts their weights.
+AVG_BETA = 0.001    # iterate averaging -> the weights we actually ship
+REPORT_EVERY = 100  # rounds
+
+# ---------------------------------------------------------------- rewards
+# Tier 1 - the true objective, scaled into [-1, 1] (see ch. 2 and ch. 5).
+REWARDS_TRUE = {
+    e.COIN_COLLECTED: 0.2,
+    e.KILLED_OPPONENT: 1.0,
+}
+# Tier 3 - declared unsafe shaping. Three items, each justified and ablatable.
+#   KILLED_SELF     the game has NO direct death penalty - this is our invention,
+#                   standing in for the lost remainder of the episode (ch. 5.3)
+#   CRATE_DESTROYED the crate -> coin chain is too long to learn from coins alone
+#   INVALID_ACTION  a wasted step
+#   BOMB_DROPPED    83% of this agent's bombs destroyed nothing (LQ_BOMBPROBE).
+#                   BOMB is a whole action, so those were ~10% of its moves
+#                   spent on nothing, plus the cost of dodging its own blast.
+#                   Bombing was FREE in the reward, and the learner noticed:
+#                   is_bomb carried an unconditional +0.035.  Charging a step
+#                   for it makes a bomb an investment that has to pay back.
+BOMB_COST = float(os.environ.get('LQ_BOMB_COST', 0.0))
+CRATE_VALUE = float(os.environ.get('LQ_CRATE_VALUE', 0.02))
+                    # raised with the cost so a bomb that opens one crate is
+                    # still clearly worth taking; two crates doubles that.
+REWARDS_EXTRA = {
+    e.KILLED_SELF: -1.0,
+    e.GOT_KILLED: -1.0,
+    e.CRATE_DESTROYED: CRATE_VALUE,
+    e.INVALID_ACTION: -0.05,
+    e.BOMB_DROPPED: -BOMB_COST,
+}
+
+# ---------------------------------------------------------------- drop-time credit
+# CRATE_DESTROYED arrives four steps after the bomb that caused it (BOMB_TIMER=4),
+# and the accumulating trace decays by gamma*lambda = 0.95*0.80 = 0.76 per step,
+# so the bombing action retains only 0.76^4 = 0.334 of that reward.  The shipped
+# weights are exactly what that predicts:
+#
+#     crates_hit_1   predicted 1 * 0.02 * 0.334 = 0.0067   measured +0.0073
+#     crates_hit_3p  predicted 4 * 0.02 * 0.334 = 0.0267   measured +0.0274
+#
+# while is_bomb - paid immediately, for the act itself - sits at +0.0348.  The
+# learner is not misbehaving; it is correctly fitting a signal that is five
+# times weaker than the one telling it to press BOMB.
+#
+# bomb_value[pos] is the EXACT number of crates a bomb dropped here will destroy,
+# and context() already computes it at decision time.  Paying for it on the
+# BOMB_DROPPED event removes the four-step delay and the 0.334 discount, landing
+# the credit undecayed on the action that caused it.
+#
+# This is NOT potential-based: it depends on the action, so it can in principle
+# change the optimal policy.  Two reasons it is defensible here.  It pays for the
+# true consequence rather than a proxy, and it cannot be farmed - one bomb at a
+# time, and the crates are actually destroyed.  CRATE_DESTROYED is switched off
+# when this is on, or the same crates would be paid for twice.
+DROP_REWARD = os.environ.get('LQ_DROP_REWARD', '0') != '0'
+if DROP_REWARD:
+    REWARDS_EXTRA[e.CRATE_DESTROYED] = 0.0
+
+
+def setup_training(self):
+    self.trace = np.zeros(N_FEATURES)
+    self.w_avg = self.w.copy()
+    self.round = 0
+    self.stats = defaultdict(float)
+    self.history = []
+    self.q_max_seen = 0.0
+    self.processed_step = -1     # guards against the double delivery, see below
+    self.logger.info(f'training: gamma={GAMMA} lambda={LAMBDA} alpha={ALPHA} '
+                     f'shaping={USE_SHAPING}')
+
+
+def reward_from(self, events, old_state, new_state, old_ctx=None):
+    """tier 1 + tier 2 (potential-based) + tier 3."""
+    r = sum(REWARDS_TRUE.get(ev, 0.0) for ev in events)
+    self.stats['true_return'] += r
+    r += sum(REWARDS_EXTRA.get(ev, 0.0) for ev in events)
+
+    if DROP_REWARD and e.BOMB_DROPPED in events and old_ctx is not None:
+        # exact, known at decision time, credited to the action that caused it
+        n = int(old_ctx['bomb_value'][old_ctx['pos']])
+        r += CRATE_VALUE * n
+        self.stats['drop_crates'] += n
+        self.stats['drop_bombs'] += 1
+
+    if USE_SHAPING:
+        # F = gamma * Phi(s') - Phi(s).  Phi(terminal) = 0 by construction.
+        r += GAMMA * potential(new_state) - potential(old_state, old_ctx)
+    return r
+
+
+def update(self, phi_sa, q_next, r, terminal, legal_next=None):
+    """One Expected SARSA(lambda) step."""
+    q_sa = float(phi_sa @ self.w)
+
+    if terminal:
+        target = r                                   # NO bootstrap past death
+    else:
+        # Expected SARSA is ON-policy: the expectation must be taken under the
+        # policy act() actually follows, mask included, or the target describes
+        # a policy we never play.
+        p = action_probabilities(q_next, self.tau, legal_next)
+        target = r + GAMMA * float(p @ q_next)
+
+    delta = target - q_sa
+
+    # accumulating trace, then a step size normalised by the feature norm so
+    # that states with many active features do not get larger updates
+    self.trace = GAMMA * LAMBDA * self.trace + phi_sa
+    alpha = ALPHA / max(float(phi_sa @ phi_sa), 1.0)
+    self.w += alpha * delta * self.trace
+    self.w_avg += AVG_BETA * (self.w - self.w_avg)
+
+    self.stats['td_abs'] += abs(delta)
+    self.stats['updates'] += 1
+    self.q_max_seen = max(self.q_max_seen, abs(q_sa))
+
+
+def game_events_occurred(self, old_game_state: dict, self_action: str,
+                         new_game_state: dict, events: List[str]):
+    if old_game_state is None or self_action is None:
+        return
+
+    a = ACTIONS.index(self_action) if self_action in ACTIONS else None
+    if a is None:                       # framework substituted WAIT on timeout
+        return
+
+    old_ctx = getattr(self, 'last_ctx', None)
+    phi_sa = (self.last_phi[a] if getattr(self, 'last_phi', None) is not None
+              else features(old_game_state, self_action))
+    phi_next = feature_matrix(new_game_state)
+    q_next = phi_next @ self.w
+
+    r = reward_from(self, events, old_game_state, new_game_state, old_ctx)
+    update(self, phi_sa, q_next, r, terminal=False,
+           legal_next=legal_mask(phi_next))
+
+    for ev in events:
+        self.stats[ev] += 1
+    self.processed_step = old_game_state['step']
+
+
+def end_of_round(self, last_game_state: dict, last_action: str, events: List[str]):
+    """
+    Two different situations arrive here, and treating them alike corrupts the
+    single most important transition in the game.
+
+    * We DIED.  environment.send_game_events() skips dead agents, so this is the
+      only delivery of that step.  It is a true terminal: no bootstrap.
+    * We SURVIVED to the step limit.  send_game_events() already delivered this
+      exact step to game_events_occurred, and end_round() re-sends the same
+      (unreset) event list with SURVIVED_ROUND appended.  Updating again would
+      apply the same transition twice and double-count its reward.  It is also
+      not a terminal - the episode was truncated by the clock - so the bootstrap
+      already applied in game_events_occurred is the correct treatment.
+
+    self.processed_step tells the two apart.
+    """
+    already_seen = (last_game_state is not None
+                    and last_game_state['step'] == self.processed_step)
+
+    if not already_seen and last_action in ACTIONS:
+        a = ACTIONS.index(last_action)
+        phi_sa = (self.last_phi[a] if getattr(self, 'last_phi', None) is not None
+                  else features(last_game_state, last_action))
+        r = reward_from(self, events, last_game_state, None,
+                        getattr(self, 'last_ctx', None))
+        update(self, phi_sa, None, r, terminal=True)
+
+    for ev in events:
+        if not already_seen or ev == e.SURVIVED_ROUND:   # the only genuinely new one
+            self.stats[ev] += 1
+
+    self.trace[:] = 0.0
+    self.last_phi = self.last_q = self.last_ctx = None
+    self.processed_step = -1
+    self.round += 1
+
+    # last_game_state predates the final step's collection, so count the score
+    # from events instead of reading a stale field
+    self.stats['score'] = (1.0 * self.stats[e.COIN_COLLECTED]
+                           + 5.0 * self.stats[e.KILLED_OPPONENT])
+    self.stats['steps'] += last_game_state['step']
+
+    if self.round % REPORT_EVERY == 0:
+        n = REPORT_EVERY
+        row = {
+            'round': self.round,
+            'score': self.stats['score'] / n,
+            'coins': self.stats[e.COIN_COLLECTED] / n,
+            'crates': self.stats[e.CRATE_DESTROYED] / n,
+            'bombs': self.stats[e.BOMB_DROPPED] / n,
+            'suicides': self.stats[e.KILLED_SELF] / n,
+            'survived': self.stats[e.SURVIVED_ROUND] / n,
+            'invalid': self.stats[e.INVALID_ACTION] / n,
+            'steps': self.stats['steps'] / n,
+            'td_abs': self.stats['td_abs'] / max(self.stats['updates'], 1),
+            'w_norm': float(np.linalg.norm(self.w)),
+            'max_abs_q': self.q_max_seen,
+        }
+        self.history.append(row)
+        self.logger.info(str(row))
+        print(f"[{self.round:5d}]  score {row['score']:5.2f}  coins {row['coins']:5.2f}"
+              f"  crates {row['crates']:5.2f}  bombs {row['bombs']:5.2f}"
+              f"  suicide {row['suicides']:4.2f}  surv {row['survived']:4.2f}"
+              f"  |w| {row['w_norm']:5.2f}  max|Q| {row['max_abs_q']:5.2f}")
+        print('          ' + describe(self.w, top=8))
+        self.stats = defaultdict(float)
+        self.q_max_seen = 0.0
+
+    # Save EVERY round, not only on the reporting boundary.  self.round restarts
+    # at 0 on each main.py invocation, so a training run shorter than
+    # REPORT_EVERY never reached the old save() call and silently discarded
+    # everything it learned - which is exactly what happened to the whole
+    # frozen-pool experiment.  The file is 4 KB; there is no reason to be thrifty.
+    save(self)
+
+
+def save(self):
+    np.savez(model_path(),
+             w=self.w_avg,                 # ship the AVERAGE, not the last iterate
+             w_last=self.w,
+             feature_names=np.array(FEATURE_NAMES),
+             actions=np.array(ACTIONS),
+             hyper=np.array([GAMMA, LAMBDA, ALPHA, float(USE_SHAPING)]))
