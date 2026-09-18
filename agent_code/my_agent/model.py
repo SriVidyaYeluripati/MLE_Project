@@ -1,10 +1,6 @@
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-# Q_Network
-# it has 6 outputs, Q(s, left), Q(s, right), Q(s, up), Q(s, down), Q(s, wait), Q(s, bomb)
 
 class DQN(nn.Module):
     def __init__(self, n_observations, n_actions):

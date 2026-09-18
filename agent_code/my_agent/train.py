@@ -1,4 +1,4 @@
-from collections import namedtuple, deque
+from collections import deque
 
 import torch
 import torch.nn as nn
@@ -13,12 +13,11 @@ from .callbacks import (
     state_to_features,
     is_position_danger,
     can_escape_from,
+    evaluate_bomb_placement,
+    get_valid_action_mask,
+    bfs_distance_to_nearest_target,
 )
-from .memory import Replay_memory
-
-# This is only an example!
-Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'reward'))
+from .memory import Replay_memory, Transition
 
 # Hyper parameters -- DO modify
 TRANSITION_HISTORY_SIZE = 3  # keep only ... last transitions
@@ -36,6 +35,9 @@ MOVED_AWAY_FROM_COIN = "MOVED_AWAY_FROM_COIN"
 NEW_POSITION = "NEW_POSITION"
 REPEATED_POSITION = "REPEATED_POSITION"
 
+USEFUL_BOMB = "USEFUL_BOMB"
+USELESS_BOMB = "USELESS_BOMB"
+
 device = torch.device(
     "cuda" if torch.cuda.is_available() else
     "mps" if torch.backends.mps.is_available() else
@@ -46,6 +48,11 @@ BATCH_SIZE = 128
 GAMMA = 0.99
 TAU = 0.005
 LR = 3e-4
+REPLAY_CAPACITY = 20000
+PER_ALPHA = 0.6
+PER_BETA_START = 0.4
+PER_BETA_ANNEAL_STEPS = 100000
+PER_BETA_INCREMENT = (1.0 - PER_BETA_START) / PER_BETA_ANNEAL_STEPS
 
 def setup_training(self):
     """
@@ -63,7 +70,11 @@ def setup_training(self):
 
     self.target_net = DQN(n_observations=N_OBSERVATIONS, n_actions=len(ACTIONS)).to(device)
 
-    self.memory = Replay_memory(5000)
+    self.memory = Replay_memory(
+        capacity=REPLAY_CAPACITY,
+        alpha=PER_ALPHA,
+    )
+    self.per_beta = PER_BETA_START
 
     self.optimizer = torch.optim.AdamW(
         self.policy_net.parameters(),
@@ -84,7 +95,11 @@ def optimize_model(self):
         return
 
 
-    transitions = self.memory.sample(BATCH_SIZE)
+    transitions, sampled_indices, importance_weights = self.memory.sample(
+        BATCH_SIZE,
+        beta=self.per_beta,
+    )
+    self.per_beta = min(1.0, self.per_beta + PER_BETA_INCREMENT)
 
     batch = Transition(*zip(*transitions))
 
@@ -98,6 +113,12 @@ def optimize_model(self):
     non_final_next_states_list = [
         s for s in batch.next_state
         if s is not None
+    ]
+
+    non_final_next_action_masks_list = [
+        mask
+        for state, mask in zip(batch.next_state, batch.next_action_mask)
+        if state is not None
     ]
 
     # state action reward batches
@@ -126,19 +147,58 @@ def optimize_model(self):
                 non_final_next_states_list
             )
 
+            non_final_next_action_masks = torch.cat(
+                non_final_next_action_masks_list
+            ).bool()
+
+            # Double DQN: the policy network selects the best valid action.
+            policy_next_q_values = self.policy_net(
+                non_final_next_states
+            ).masked_fill(
+                ~non_final_next_action_masks,
+                float("-inf")
+            )
+
+            next_actions = policy_next_q_values.argmax(
+                dim=1,
+                keepdim=True
+            )
+
+            # The target network evaluates the action chosen by the policy
+            # network. Separating selection and evaluation reduces Q-value
+            # overestimation while preserving action masking.
+            target_next_q_values = self.target_net(
+                non_final_next_states
+            )
+
             next_state_values[non_final_mask] = (
-                self.target_net(non_final_next_states)
-                .max(dim=1)
-                .values
+                target_next_q_values
+                .gather(1, next_actions)
+                .squeeze(1)
             )
 
 
-    # Compute the expected Q values
-    expected_state_action_values = (next_state_values * GAMMA) + reward_batch
+    # Compute the one-step Double DQN target.
+    expected_state_action_values = reward_batch + GAMMA * next_state_values
 
-    # Compute Huber loss
-    criterion = nn.SmoothL1Loss()
-    loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
+    # Compute a per-transition Huber loss so prioritized replay can apply
+    # importance-sampling weights and correct its sampling bias.
+    td_errors = (
+        expected_state_action_values
+        - state_action_values.squeeze(1)
+    )
+
+    criterion = nn.SmoothL1Loss(reduction="none")
+    per_transition_loss = criterion(
+        state_action_values.squeeze(1),
+        expected_state_action_values,
+    )
+    importance_weights = torch.as_tensor(
+        importance_weights,
+        dtype=torch.float32,
+        device=device,
+    )
+    loss = (importance_weights * per_transition_loss).mean()
 
     # Optimize the model
     self.optimizer.zero_grad()
@@ -146,6 +206,13 @@ def optimize_model(self):
     # in-place gradient clipping
     torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
     self.optimizer.step()
+
+    # The absolute TD error determines how likely each transition is to be
+    # replayed in future optimization steps.
+    self.memory.update_priorities(
+        sampled_indices,
+        td_errors.detach().abs().cpu().numpy(),
+    )
 
     # Soft update of the target network
     target_net_state_dict = self.target_net.state_dict()
@@ -187,6 +254,11 @@ def game_events_occurred(self, old_game_state: dict, self_action: str, new_game_
 
     state = state_to_features(old_game_state)
     next_state = state_to_features(new_game_state)
+    next_action_mask = torch.tensor(
+        get_valid_action_mask(new_game_state),
+        dtype=torch.bool,
+        device=device,
+    ).unsqueeze(0)
 
     action = torch.tensor(
         [[ACTIONS.index(self_action)]],
@@ -219,26 +291,31 @@ def game_events_occurred(self, old_game_state: dict, self_action: str, new_game_
 
     self.recent_positions.append(new_position)
 
-    # reward movement toward the nearest visible coin
+    # Reward progress along an actual reachable path to a visible coin. Using
+    # Manhattan distance here conflicts with the BFS feature whenever a wall or
+    # crate requires a temporary detour and can teach an A/B movement loop.
     coins = old_game_state["coins"]
     if coins:
-        nearest_coin = min(
-            coins, 
-            key=lambda coin: abs(coin[0] - old_x) + abs(coin[1] - old_y)
+        old_distance = bfs_distance_to_nearest_target(
+            field=old_field,
+            start=old_position,
+            targets=coins,
+            bombs=old_bombs,
+            others=old_game_state["others"],
+        )
+        new_distance = bfs_distance_to_nearest_target(
+            field=new_field,
+            start=new_position,
+            targets=coins,
+            bombs=new_bombs,
+            others=new_game_state["others"],
         )
 
-        old_distance = (
-            abs(nearest_coin[0] - old_x) + abs(nearest_coin[1] - old_y)
-        )
-
-        new_distance = (
-            abs(nearest_coin[0] - new_x) + abs(nearest_coin[1] - new_y)
-        )
-
-        if new_distance < old_distance:
-            events.append(MOVED_TOWARD_COIN)
-        elif new_distance > old_distance:
-            events.append(MOVED_AWAY_FROM_COIN)
+        if old_distance is not None and new_distance is not None:
+            if new_distance < old_distance:
+                events.append(MOVED_TOWARD_COIN)
+            elif new_distance > old_distance:
+                events.append(MOVED_AWAY_FROM_COIN)
 
 
     old_danger = is_position_danger(
@@ -272,25 +349,20 @@ def game_events_occurred(self, old_game_state: dict, self_action: str, new_game_
         # Only evaluate if the bomb action was actually possible
         if bomb_available:
 
-            x, y = old_game_state["self"][3]
+            bomb_quality = evaluate_bomb_placement(old_game_state)
 
-            hypothetical_bombs = list(old_game_state["bombs"])
-
-            # Simulate the bomb that we are considering placing
-            hypothetical_bombs.append(
-                ((x, y), 3)
-            )
-
-            safe_to_escape = can_escape_from(
-                (x, y),
-                old_game_state["field"],
-                hypothetical_bombs,
-                old_game_state["others"],
-                old_game_state["explosion_map"]
-            )
-
-            if not safe_to_escape:
+            if not bomb_quality["escape_possible"]:
                 events.append(UNSAFE_BOMB)
+
+            elif(
+                bomb_quality["crates_hit"] > 0 
+                 or bomb_quality["enemy_in_blast"]
+            ):
+                events.append(USEFUL_BOMB)
+
+            else:
+                events.append(USELESS_BOMB)
+
 
     reward = reward_from_events(self, events)
 
@@ -298,7 +370,8 @@ def game_events_occurred(self, old_game_state: dict, self_action: str, new_game_
         state,
         action,
         next_state,
-        reward
+        reward,
+        next_action_mask,
     )
 
     optimize_model(self)
@@ -328,7 +401,8 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: List[str
             device=device
         ),
         None,
-        reward_from_events(self, events)
+        reward_from_events(self, events),
+        None,
     )
 
     optimize_model(self)
@@ -365,12 +439,16 @@ def reward_from_events(self, events: List[str]) -> torch.Tensor:
 
         ESCAPED_DANGER: 5,
         ENTERED_DANGER: -5,
-        UNSAFE_BOMB: -15,
+        # UNSAFE_BOMB: -15,
 
         MOVED_TOWARD_COIN: 1,
         MOVED_AWAY_FROM_COIN: -0.5,
         NEW_POSITION: 0.5,
         REPEATED_POSITION: -0.5,
+
+        USEFUL_BOMB: 0.2,
+        USELESS_BOMB: -1,
+        UNSAFE_BOMB: -12,
     }
     reward_sum = 0
     for event in events:
