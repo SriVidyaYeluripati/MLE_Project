@@ -1,0 +1,84 @@
+{
+  "agent": "model_linearQ",
+  "model": "Model LinQ (linear Q, Expected SARSA(lambda))",
+  "id": "noise_floor",
+  "title": "Training noise floor",
+  "section": "build log 9",
+  "question": "How large is an effect allowed to be before it counts as real?",
+  "design": {
+    "arms": [
+      "identical recipe"
+    ],
+    "n": 6,
+    "paired": false,
+    "note": "six independent trainings, identical recipe and hyperparameters, different seeds"
+  },
+  "raw_runs": "results/model_linq/noise/",
+  "runs": [
+    {
+      "seed": 1,
+      "margin": -0.51,
+      "score": 2.45,
+      "coins": 1.25,
+      "crates": 22.3,
+      "bombs": 41.1,
+      "crates_per_bomb": 0.54
+    },
+    {
+      "seed": 2,
+      "margin": 0.35,
+      "score": 3.01,
+      "coins": 2.25,
+      "crates": 24.1,
+      "bombs": 47.3,
+      "crates_per_bomb": 0.51
+    },
+    {
+      "seed": 3,
+      "margin": 0.33,
+      "score": 2.99,
+      "coins": 2.29,
+      "crates": 23.7,
+      "bombs": 50.4,
+      "crates_per_bomb": 0.47
+    },
+    {
+      "seed": 4,
+      "margin": -0.62,
+      "score": 2.31,
+      "coins": 1.49,
+      "crates": 15.5,
+      "bombs": 51.1,
+      "crates_per_bomb": 0.3
+    },
+    {
+      "seed": 5,
+      "margin": 1.06,
+      "score": 3.62,
+      "coins": 2.52,
+      "crates": 30.4,
+      "bombs": 33.9,
+      "crates_per_bomb": 0.9
+    },
+    {
+      "seed": 6,
+      "margin": -0.06,
+      "score": 2.71,
+      "coins": 2.06,
+      "crates": 22.2,
+      "bombs": 50.6,
+      "crates_per_bomb": 0.44
+    }
+  ],
+  "summary": {
+    "margin_mean": 0.09,
+    "margin_sd": 0.63,
+    "margin_spread": 1.68,
+    "score_mean": 2.85,
+    "coins_mean": 1.98,
+    "crates_mean": 23.0,
+    "bombs_mean": 45.7
+  },
+  "verdict": "reference",
+  "conclusion": "Training variance alone spans 1.68 margin. Any claimed effect smaller than that, measured on a single training run, is not distinguishable from the seed."
+}
