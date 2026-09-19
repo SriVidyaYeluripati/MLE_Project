@@ -291,9 +291,7 @@ def game_events_occurred(self, old_game_state: dict, self_action: str, new_game_
 
     self.recent_positions.append(new_position)
 
-    # Reward progress along an actual reachable path to a visible coin. Using
-    # Manhattan distance here conflicts with the BFS feature whenever a wall or
-    # crate requires a temporary detour and can teach an A/B movement loop.
+    
     coins = old_game_state["coins"]
     if coins:
         old_distance = bfs_distance_to_nearest_target(
