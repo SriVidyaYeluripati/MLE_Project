@@ -17,26 +17,15 @@ device = torch.device(
 
 ACTIONS = ['UP', 'RIGHT', 'DOWN', 'LEFT', 'WAIT', 'BOMB']
 MODEL_FILE = "my-saved-model.pt"
-# first features count: 4 coins directions, 4 free up, right, down, left, 1 bomb availability
-# 4 adjacent crate indicators, 4 adjacents enemy indicators, 4 danger indicators, 1 current danger indicator
-# 29 previous features + 4 crate-goal directions + 4 enemy-goal directions
+# 4 free directions, bomb availability, coin, crate and enemy directions
+# adjacent crates and enemies, danger values, escape directions and bomb quality
+# all together we have 37 observations
+
 N_OBSERVATIONS = 37
 REVERSAL_Q_PENALTY = 0.5
 
 def setup(self):
-    """
-    Setup your code. This is called once when loading each agent.
-    Make sure that you prepare everything such that act(...) can be called.
-
-    When in training mode, the separate `setup_training` in train.py is called
-    after this method. This separation allows you to share your trained agent
-    with other students, without revealing your training code.
-
-    In this example, our model is a set of probabilities over actions
-    that are is independent of the game state.
-
-    :param self: This object is passed to all callbacks and you can set arbitrary values.
-    """
+    """initialize the network and load the saved model if there is one"""
 
     self.policy_net = DQN(n_observations=N_OBSERVATIONS, n_actions=len(ACTIONS)).to(device)
 
@@ -70,7 +59,7 @@ def _load_model_state(path):
 
 
 def bfs_path_to_nearest_target(field, start, targets, bombs, others):
-    """Return the first BFS direction and distance to a reachable target."""
+    """find the first direction and distance to the nearest reachable target"""
 
     if not targets:
         return [0, 0, 0, 0], None
@@ -82,7 +71,7 @@ def bfs_path_to_nearest_target(field, start, targets, bombs, others):
     bomb_positions = {bomb_position for bomb_position, _ in bombs}
     enemy_positions = {agent[3] for agent in others}
 
-    # this order is consistent with the feature vector and ACTIONS
+    # keep the same order as ACTIONS and our features
     directions = [
         ((0, -1), [1, 0, 0, 0]),  # UP
         ((1, 0), [0, 1, 0, 0]),   # RIGHT
@@ -136,7 +125,7 @@ def bfs_path_to_nearest_target(field, start, targets, bombs, others):
 
 
 def bfs_direction_to_nearest_target(field, start, targets, bombs, others):
-    """Return a one-hot first step toward the nearest reachable target."""
+    """get the first BFS direction to the nearest target as one hot"""
     direction, _ = bfs_path_to_nearest_target(
         field,
         start,
@@ -148,7 +137,7 @@ def bfs_direction_to_nearest_target(field, start, targets, bombs, others):
 
 
 def bfs_distance_to_nearest_target(field, start, targets, bombs, others):
-    """Return BFS path length to the nearest target, or None if unreachable."""
+    """get the BFS distance to the nearest target, None means not reachable"""
     _, distance = bfs_path_to_nearest_target(
         field,
         start,
@@ -160,7 +149,7 @@ def bfs_distance_to_nearest_target(field, start, targets, bombs, others):
 
 
 def approach_tiles(field, object_positions, bombs, others):
-    """Return free tiles from which a crate or opponent can be approached."""
+    """get the free tiles beside crates or opponents"""
     bomb_positions = {bomb_position for bomb_position, _ in bombs}
     enemy_positions = {agent[3] for agent in others}
     targets = set()
@@ -184,7 +173,7 @@ def approach_tiles(field, object_positions, bombs, others):
     return targets
 
 def blast_coordinates(field, bomb_position, blast_range=3):
-    """return every tile hit by bombs blast with respect to walls and crates"""
+    """return all tiles hit by the bomb considering walls and crates"""
     bomb_x, bomb_y = bomb_position
     blast_tiles = [(bomb_x, bomb_y)]
 
@@ -207,11 +196,8 @@ def blast_coordinates(field, bomb_position, blast_range=3):
     return blast_tiles
 
 def build_danger_map(field, explosion_map, bombs):
-    """return the earliest explosion time for every tile on the game"""
-    # -1: no explosion that we know will hit the tile
-    # 0: an explosion is already happening on this tile
-    # 1: the tile will be explode after the agent's next move
-    # 2 and above: the number steps until the explosion happens
+    """get the earliest explosion time for every tile"""
+    # -1 means safe, 0 means exploding now and larger values show the time left
 
     danger_map = np.full(field.shape, -1, dtype=np.int16)
     danger_map[explosion_map > 0] = 0
@@ -229,7 +215,7 @@ def build_danger_map(field, explosion_map, bombs):
         for bomb_position, _ in bombs
     }
 
-    # active explosion can trigger bomb immediately
+    # an active explosion can trigger another bomb immediately
     for bomb_position in explosion_times:
         bx, by = bomb_position
         if explosion_map[bx, by] > 0:
@@ -264,7 +250,7 @@ def build_danger_map(field, explosion_map, bombs):
     return danger_map
 
 def danger_map_feature(danger_map, position):
-    """convert a danger map time to a normalized feature in [0, 1]"""
+    """normalize the danger time between 0 and 1"""
     x, y = position
 
     if x < 0 or y < 0 or x >= danger_map.shape[0] or y >= danger_map.shape[1]:
@@ -279,8 +265,7 @@ def danger_map_feature(danger_map, position):
 
 
 def evaluate_bomb_placement(game_state):
-    """ return values are observations for qualityh of planting a bomb and are observations for DQN,
-    not action decision"""
+    """check if planting a bomb is useful and if the agent can escape"""
 
     field = game_state["field"]
     explosion_map = game_state["explosion_map"]
@@ -309,8 +294,7 @@ def evaluate_bomb_placement(game_state):
         others=others,
         explosion_map=explosion_map,
         max_depth=6,
-        # Planting the bomb consumes the current action. The first escape move
-        # therefore reaches a neighboring tile at time 2.
+        # planting the bomb takes one step so escaping starts after that
         start_time=1,
         avoid_opponent_interception=True,
     )
@@ -323,13 +307,10 @@ def evaluate_bomb_placement(game_state):
 
 
 def get_valid_action_mask(game_state):
-    """Return a Boolean mask for actions with a survivable continuation.
+    """mask actions that do not have a safe continuation
 
-    Movement and WAIT must be immediately safe and must leave a time-valid path
-    to a tile outside every known blast. BOMB is allowed only when the
-    hypothetical bomb still leaves such an escape path. If no fully survivable
-    action exists, fall back to immediately safe actions so the framework can
-    still receive a legal choice.
+    I added this because sometimes a move looked safe for one step but the
+    agent would get trapped after that
     """
     if game_state is None:
         return np.array([False, False, False, False, True, False], dtype=np.bool_)
@@ -354,8 +335,7 @@ def get_valid_action_mask(game_state):
         if position in bomb_positions or position in enemy_positions:
             return False
 
-        # The movement arrives at time 1. Do not enter a tile that explodes
-        # before or exactly when the agent gets there.
+        # after moving one step the tile must still be safe
         explosion_time = int(danger_map[px, py])
         return explosion_time < 0 or explosion_time > 1
 
@@ -382,9 +362,7 @@ def get_valid_action_mask(game_state):
         current_explosion_time < 0 or current_explosion_time > 1
     )
 
-    # Validate the complete continuation, not only the next tile. This prevents
-    # choosing a direction that looks safe for one step but ends in a dead end
-    # before a known explosion.
+    # also check that there is an escape after the first move
     mask = np.zeros(len(ACTIONS), dtype=np.bool_)
 
     escape_distances = np.full(len(ACTIONS), np.inf, dtype=np.float32)
@@ -405,8 +383,7 @@ def get_valid_action_mask(game_state):
         )
         if distance is not None:
             mask[action_index] = True
-            # One action is needed to enter `position`, followed by `distance`
-            # additional moves to reach a tile outside all known blasts.
+            # one step to enter the tile plus the rest of the escape path
             escape_distances[action_index] = 1 + distance
 
     wait_index = ACTIONS.index("WAIT")
@@ -426,8 +403,7 @@ def get_valid_action_mask(game_state):
             escape_distances[wait_index] = 1 + distance
 
     bomb_index = ACTIONS.index("BOMB")
-    # Do not spend another step planting a bomb while already inside a known
-    # blast path. Escape first; bombing decisions resume from a safe tile.
+    # if we are already in danger, escape first and do not plant a bomb
     if bomb_available and current_explosion_time < 0:
 
         bomb_quality = evaluate_bomb_placement(game_state)
@@ -443,23 +419,19 @@ def get_valid_action_mask(game_state):
         immediate_mask[bomb_index] = bomb_is_valid
         mask[bomb_index] = bomb_is_valid
 
-    # When danger is already present, merely knowing that several actions have
-    # an escape continuation is not enough: repeatedly selecting different
-    # "still escapable" actions can waste the remaining bomb timer. Keep only
-    # first steps belonging to a fastest known escape. Outside danger, the DQN
-    # retains the full valid-action choice for collecting, bombing and combat.
+    # while in danger only keep the fastest escape moves
+    # otherwise the agent may change direction and waste the bomb timer
     if current_explosion_time >= 0:
         finite_distances = escape_distances[np.isfinite(escape_distances)]
         if finite_distances.size:
             fastest_escape = finite_distances.min()
             mask &= escape_distances == fastest_escape
 
-    # Known blast paths can occasionally leave no provably survivable choice.
-    # Prefer an immediately safe legal action over forcing WAIT in that case.
+    # if no full escape is found, at least use an immediately safe action
     if not mask.any():
         mask = immediate_mask
 
-    # If the agent is already trapped, the framework still requires an action.
+    # the environment still needs an action even if the agent is trapped
     if not mask.any():
         mask[wait_index] = True
 
@@ -467,14 +439,7 @@ def get_valid_action_mask(game_state):
     
 
 def act(self, game_state: dict) -> str:
-    """
-    Your agent should parse the input, think, and take a decision.
-    When not in training mode, the maximum execution time for this method is 0.5s.
-
-    :param self: The same object that is passed to all of your callbacks.
-    :param game_state: The dictionary that describes everything on the board.
-    :return: The action to take as a string.
-    """
+    """choose an action using epsilon greedy and the valid action mask"""
     # todo Exploration vs exploitation
 
     # random_prob = .1
@@ -517,7 +482,7 @@ def act(self, game_state: dict) -> str:
     valid_action_indices = np.flatnonzero(valid_action_mask).tolist()
 
     if self.train and random.random() < eps_threshold:
-        # Exploration must also choose only valid actions.
+        # also during exploration choose only valid actions
         action = random.choice(valid_action_indices)
     else:
         with torch.no_grad():
@@ -529,10 +494,8 @@ def act(self, game_state: dict) -> str:
             ).unsqueeze(0)
             q_values = q_values.masked_fill(~mask_tensor, float("-inf"))
 
-            # Break deterministic A->B->A oscillations softly. This is not a
-            # hard mask: returning remains possible when it is genuinely much
-            # better. Never apply it during bomb danger or when returning would
-            # immediately collect a visible coin.
+            # reduce simple A to B to A loops but do not completely block going back
+            # we also do not use this when in danger or when there is a coin there
             danger_map_for_choice = build_danger_map(
                 game_state["field"],
                 game_state["explosion_map"],
@@ -555,7 +518,7 @@ def act(self, game_state: dict) -> str:
                         q_values[0, action_index] -= REVERSAL_Q_PENALTY
 
         action = q_values.argmax(dim=1).item()
-        # Temporary evaluation debugging
+        # temporary prints for checking the agent during evaluation
         if not self.train and os.environ.get("DQN_DEBUG") == "1":
             x, y = game_state["self"][3]
 
@@ -602,19 +565,7 @@ def act(self, game_state: dict) -> str:
 
 
 def state_to_features(game_state: dict) -> torch.Tensor:
-    """
-    *This is not a required function, but an idea to structure your code.*
-
-    Converts the game state to the input of your model, i.e.
-    a feature vector.
-
-    You can find out about the state of the game environment via game_state,
-    which is a dictionary. Consult 'get_state_for_agent' in environment.py to see
-    what it contains.
-
-    :param game_state:  A dictionary describing the current game board.
-    :return: np.array
-    """
+    """convert the game state to the 37 features used by the DQN"""
     if game_state is None:
         return None
 
@@ -650,8 +601,7 @@ def state_to_features(game_state: dict) -> torch.Tensor:
     # bomb availability
     features.append(int(bomb_available))
 
-    # This is after first failure
-    # directions of nearest coin
+    # BFS direction to the nearest coin
 
     coins = game_state["coins"]
 
@@ -664,9 +614,7 @@ def state_to_features(game_state: dict) -> torch.Tensor:
     )
     features.extend(coin_direction)
 
-    # BFS direction to the nearest reachable tile beside a crate. Crates are
-    # not walkable targets themselves, so their free neighboring tiles are the
-    # useful bomb-placement goals.
+    # go toward a free tile beside the nearest crate because we cannot walk on it
     crate_positions = [
         tuple(position)
         for position in np.argwhere(field == 1)
@@ -686,9 +634,8 @@ def state_to_features(game_state: dict) -> torch.Tensor:
     )
     features.extend(crate_direction)
 
-    # BFS direction to a reachable tile beside an opponent. When already next
-    # to an opponent this direction is all zero, while the existing adjacent
-    # enemy and bomb-quality features describe the immediate attack decision.
+    # go toward a reachable tile beside an opponent
+    # if it is already beside us the other features handle the attack decision
     enemy_approach_tiles = approach_tiles(
         field,
         enemy_positions,
@@ -793,10 +740,7 @@ def state_to_features(game_state: dict) -> torch.Tensor:
 
 
 def is_position_danger(field, explosion_map, position, bombs):
-    """
-    Return True if the position is currently or eventually affected
-    by an explosion.
-    """
+    """check if a position is now or later inside a blast"""
     x, y = position
 
     if (
@@ -817,7 +761,7 @@ def is_position_danger(field, explosion_map, position, bombs):
 
 
 def opponent_arrival_map(field, bombs, others, max_depth=6):
-    """Earliest number of moves in which an opponent can reach each tile."""
+    """get the earliest time an opponent can reach each tile"""
     distances = np.full(field.shape, max_depth + 1, dtype=np.int16)
     bomb_positions = {position for position, _ in bombs}
     queue = deque()
@@ -856,11 +800,9 @@ def escape_distance_from(start,
     danger_map=None,
     start_time=0,
     avoid_opponent_interception=False,):
-    """Return the shortest time-valid distance to a tile outside known blasts.
+    """get the shortest safe escape distance
 
-    ``None`` means that no escape was found within ``max_depth``. ``start_time``
-    is the time at which the agent reaches ``start`` relative to the current
-    game state.
+    None means that no escape was found before max_depth
     """
     enemy_positions = {agent[3] for agent in others}
 
@@ -878,39 +820,39 @@ def escape_distance_from(start,
             max_depth=max_depth + start_time,
         )
 
-    # walkable
+    # check if the agent can walk on a tile
     def is_walkable(position):
         px, py = position
 
-        # prevent moving outside the board
+        # do not move outside the board
         if (px < 0 or py < 0 or px >= field.shape[0] or py >= field.shape[1]):
             return False
 
-        # walls and crates cant be walked on
+        # walls and crates are blocked
         if field[px, py] != 0:
             return False
 
         if position in enemy_positions:
             return False
 
-        # existing bombs cant be walked on
+        # existing bombs are blocked except the bomb below the starting agent
         if position in bomb_positions and position != start:
             return False
 
         return True
 
-    # We cannot escape through this direction if the starting tile is blocked.
+    # there is no escape if the starting tile itself is blocked
     if not is_walkable(start):
         return None
 
     start_x, start_y = start
     start_danger_time = int(danger_map[start_x, start_y])
 
-    # The explosion happens no later than our arrival on this tile.
+    # this tile explodes before or when the agent arrives
     if 0 <= start_danger_time <= start_time:
         return None
 
-    # A tile that is absent from the danger map is a valid safe destination.
+    # -1 means this tile is already a safe destination
     if start_danger_time == -1:
         return 0
 
@@ -945,18 +887,15 @@ def escape_distance_from(start,
             next_arrival_time = arrival_time + 1
             next_danger_time = int(danger_map[nx, ny])
 
-            # In simultaneous play an opponent can enter our intended escape
-            # tile in the same step. The engine then rejects our movement and
-            # leaves us inside the blast. A bomb is considered safely
-            # escapable only if the planned path cannot be intercepted this
-            # quickly by a currently visible opponent.
+            # an opponent may enter the escape tile at the same time and block us
+            # so reject paths where the opponent can arrive first or together
             if (
                 enemy_arrival is not None
                 and int(enemy_arrival[nx, ny]) <= next_arrival_time
             ):
                 continue
 
-            # It is safe to cross a future blast tile only before it explodes.
+            # a dangerous tile can only be crossed before its explosion time
             if 0 <= next_danger_time <= next_arrival_time:
                 continue
 
@@ -978,7 +917,7 @@ def can_escape_from(start,
     danger_map=None,
     start_time=0,
     avoid_opponent_interception=False,):
-    """Return whether a time-valid escape exists within ``max_depth``."""
+    """check if a safe escape exists before max_depth"""
     return escape_distance_from(
         start=start,
         field=field,
