@@ -1,5 +1,5 @@
 """
-Model A - train.py  (the part that LEARNS)
+ForestQ - train.py  (the part that LEARNS)
 
 Fitted Q-Iteration: keep one regressor per action. Every REFIT_EVERY rounds,
 rebuild the Q-learning targets  r + GAMMA * max_a' Q(s', a')  and refit all
@@ -66,7 +66,7 @@ def setup_training(self):
     self.round_count = 0
     self.epsilon = EPS_START
     self.processed_step = -1     # guards the double delivery, see end_of_round
-    self.logger.info(f"Model A training: {N_FEATURES} features, {REGRESSOR}, "
+    self.logger.info(f"ForestQ training: {N_FEATURES} features, {REGRESSOR}, "
                      f"symmetry={USE_SYMMETRY}.")
 
 

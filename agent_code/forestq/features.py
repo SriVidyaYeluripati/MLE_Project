@@ -1,19 +1,4 @@
-"""
-Shared feature extraction: game_state dict -> fixed-length float vector.
 
-============================ TEAM CONTRACT ============================
-Model A (this folder) and Model B (the DQN) both import from here so
-they run on IDENTICAL input. That makes "Model A vs Model B" a real
-controlled comparison instead of two unrelated things.
-
-To use in the DQN, in its callbacks.py:
-    from .features import state_to_features, N_FEATURES
-    N_OBSERVATIONS = N_FEATURES        # = 28
-
-Anyone who changes FEATURE_NAMES must tell the whole team, because it
-changes the input size of every model.
-======================================================================
-"""
 import numpy as np
 from collections import deque
 
