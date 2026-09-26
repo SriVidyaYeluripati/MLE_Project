@@ -5,11 +5,11 @@
 # model_gbt      fitted Q-iteration with gradient boosting - scikit-learn
 # my_agent       DQN - torch
 #
-# The ForestQ and GBT model files were pickled with scikit-learn 1.9.0; other
+# The ForestQ and GBT model files were pickled with scikit-learn 1.8; newer
 # versions load them with a version warning.
 
 numpy>=1.24
-scikit-learn>=1.9
+scikit-learn>=1.7,<1.9
 torch>=2.0
 
 # Development only, not needed to run an agent:
