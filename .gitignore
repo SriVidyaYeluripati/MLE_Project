@@ -31,8 +31,6 @@ __pycache__/
 agent_code/*/*.npz
 agent_code/*/*.pt
 agent_code/*/checkpoints/
-agent_code/model_dqn/
-agent_code/model_gbt/
 agent_code/model_linearQ/w_*.npz
 env/
 logs/
@@ -46,7 +44,6 @@ experiments/weights/
 .exp_done/
 *.patch
 __pycache__/
-agent_code/shayan_ddqn/
 
 !logs/.gitkeep
 
