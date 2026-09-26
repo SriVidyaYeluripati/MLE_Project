@@ -1,3 +1,4 @@
+"""Summarise the five bombing arms from their saved result files."""
 import json, os, numpy as np
 ARMS = [('base','control'), ('drop','drop-time crate reward'),
         ('tgt','selective crate targets'), ('both','drop + targets'),

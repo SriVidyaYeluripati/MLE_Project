@@ -47,3 +47,7 @@ experiments/weights/
 *.patch
 __pycache__/
 agent_code/shayan_ddqn/
+
+!logs/.gitkeep
+
+!agent_code/forestq/forestq.pt

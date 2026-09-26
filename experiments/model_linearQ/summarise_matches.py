@@ -1,3 +1,4 @@
+"""Print margin and per-round rates from saved match statistics."""
 import json, os, glob
 def row(path, me='model_linearQ'):
     d = json.load(open(path))['by_agent']

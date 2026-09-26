@@ -29,7 +29,7 @@ elif OLD in s:
     py_compile.compile(t, doraise=True)
     print('train.py  : PATCHED (saves every round now)')
 else:
-    sys.exit('train.py  : pattern not found - stop, do not push, tell Claude')
+    sys.exit('train.py  : pattern not found - stop, do not push')
 
 p = 'setup_pool.sh'
 try:

@@ -13,7 +13,7 @@ import numpy as np
 from .features import state_to_features, N_FEATURES
 
 ACTIONS = ['UP', 'RIGHT', 'DOWN', 'LEFT', 'WAIT', 'BOMB']
-MODEL_FILE = "model_a.pt"
+MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forestq.pt")
 
 # Exploration is NOT uniform over the six actions.  A random BOMB can end the
 # episode, and an episode that ends early stops producing data - so uniform

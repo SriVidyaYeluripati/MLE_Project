@@ -1,3 +1,4 @@
+"""Training file with the crate reward paid when the bomb is dropped."""
 import csv
 import os
 from collections import defaultdict
