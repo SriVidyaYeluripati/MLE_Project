@@ -2,17 +2,19 @@
 
 Owner: Sri Vidya Yeluripati.
 
-Six regressors, one per action, fitted on collected transitions; the targets are
-rebuilt as r + gamma * max Q(s', a') after each batch and all six are refitted.
-Random forests of 40 trees, minimum leaf size 5, gamma 0.9, epsilon decaying
-from 1.0 to 0.05 over 400 rounds, and 8x data augmentation from the board
+ForestQ is six regressors, one per action, fitted on collected transitions.
+After each batch we rebuild the targets as r + gamma * max Q(s', a') and
+refit all six. Each regressor is a random forest of 40 trees, minimum leaf
+size 5. Training uses gamma = 0.9, epsilon decaying from 1.0 to 0.05 over 400
+rounds, and 8x data augmentation from the board's rotational and mirror
 symmetries.
 
 ## The shared feature contract
 
-`features.py` holds the 28-feature contract used by this agent and by
-`agent_code/model_gbt`. Anyone who changes `FEATURE_NAMES` must tell the team,
-because it changes the input of every model that uses it.
+`features.py` holds the 28-feature contract that this agent and
+`agent_code/model_gbt` both use. If you change `FEATURE_NAMES`, tell the
+team first — it changes the input of every model built on this contract, not
+just this one.
 
 ## Files
 

@@ -48,3 +48,14 @@ __pycache__/
 !logs/.gitkeep
 
 !agent_code/forestq/forestq.pt
+#Vidya additional ignore rules
+!results/.gitkeep
+!results/ablation/
+!results/ablation/**
+!results/*/
+!results/**
+!agent_code/model_linearQ/weights.npz
+!agent_code/model_gbt/*.pt
+!agent_code/my_agent/my-saved-model.pt
+!logs/
+!logs/.gitkeep
