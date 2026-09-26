@@ -1,0 +1,17 @@
+# Libraries needed beyond the tournament base image.
+#
+# model_linearQ  linear Q-learning, submitted agent - numpy only
+# forestq        fitted Q-iteration with random forests - scikit-learn
+# model_gbt      fitted Q-iteration with gradient boosting - scikit-learn
+# my_agent       DQN - torch
+#
+# The ForestQ and GBT model files were pickled with scikit-learn 1.9.0; other
+# versions load them with a version warning.
+
+numpy>=1.24
+scikit-learn>=1.9
+torch>=2.0
+
+# Development only, not needed to run an agent:
+# pygame  (GUI)
+# tqdm    (progress bars)

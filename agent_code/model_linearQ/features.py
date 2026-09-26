@@ -1,40 +1,4 @@
-"""
-Danger model and feature extraction for Model LinQ.    Q(s, a) = w . phi(s, a)
-
-Two halves, in dependency order:
-
-  1. the danger model - blast geometry, a time-indexed lethality map, and an
-     exact backward recursion over it that answers "does any sequence of moves
-     survive from here";
-  2. the feature vector built on top of it.
-
-Features are ACTION-RELATIVE and share one weight vector: phi describes what an
-action *does*, not where we are.  That is why "move toward the nearest coin" is
-learned once instead of four times, and why nothing here refers to absolute
-board coordinates.
-
-Timing facts, verified against the framework (settings.py, items.py,
-environment.py) rather than assumed:
-
-  BOMB_POWER      = 3      blast reaches 3 tiles in each direction
-  BOMB_TIMER      = 4      countdown seen in game_state['bombs']
-  EXPLOSION_TIMER = 2      the blast is lethal on 2 consecutive steps
-  get_blast_coords breaks only on arena == -1  ->  CRATES DO NOT SHIELD YOU
-
-Order inside environment.do_step():
-    agents act  ->  collect_coins  ->  update_explosions  ->  update_bombs
-    ->  evaluate_explosions (this is where agents die)
-
-Let step j = 0 be the step we are deciding right now, so the tile we occupy
-after our action is evaluated for lethality at j = 0.
-
-  * a bomb observed with timer t detonates at step j = t, and its tiles are
-    lethal at j = t and j = t + 1.
-  * explosion_map[x, y] >= 1 means that tile is still lethal at j = 0.
-    (A value of 0 is always safe: such an explosion turns to smoke in
-    update_explosions, before evaluate_explosions runs.)
-"""
-
+#Vidya's part
 from collections import deque
 
 import numpy as np
@@ -59,7 +23,7 @@ UNREACHABLE = np.iinfo(np.int32).max
 
 
 def blast_coords(field, bx, by, power=BOMB_POWER):
-    """Tiles covered by a bomb at (bx, by). Mirrors Bomb.get_blast_coords."""
+    #Here tiles are covered by a bomb at (bx, by). Mirrors Bomb.get_blast_coords.
     coords = [(bx, by)]
     for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
         for i in range(1, power + 1):
@@ -73,7 +37,8 @@ def blast_coords(field, bx, by, power=BOMB_POWER):
 
 
 def danger_map(game_state, horizon=HORIZON):
-    """lethal[j, x, y] is True if standing on (x, y) at the end of step j kills us."""
+# We would want to use the explosion_map, but it is not updated for bombs that are just dropped :(.
+# But we can compute by using the blast coordinates of all bombs, and the explosion_map for beginning step.
     field = game_state['field']
     lethal = np.zeros((horizon,) + field.shape, dtype=bool)
 
@@ -85,12 +50,15 @@ def danger_map(game_state, horizon=HORIZON):
 
     exp = game_state['explosion_map']
     lethal[0][exp >= 1] = True
+    
+    # array is read only, so we can use it as a cache key.
+    lethal.flags.writeable = False
 
     return lethal
 
 
 def blocked_map(game_state):
-    """Tiles we cannot move onto: walls, crates, bombs, other agents."""
+# We make sure that obviously tiles we cannot move (bombs,crates,walls or other agents) onto.
     field = game_state['field']
     blocked = field != 0
     for (bx, by), _ in game_state['bombs']:
@@ -101,12 +69,13 @@ def blocked_map(game_state):
 
 
 def safe_bfs(start, blocked, lethal, horizon=HORIZON):
-    """Time-aware BFS over (x, y, j). Returns reachable-tile sets and a distance map."""
+# Normal BFS would be a bit simpler, but we need to avoid lethal tiles at the right time step., so we use Time aware BFS
     dist = np.full(blocked.shape, UNREACHABLE, dtype=np.int32)
     dist[start] = 0
 
     frontier = {start}
     reach = []
+    #so we can see which tiles are reachable at each time step and also the distance to each tile.
     for j in range(horizon):
         nxt = set()
         for (x, y) in frontier:
@@ -122,6 +91,7 @@ def safe_bfs(start, blocked, lethal, horizon=HORIZON):
                 if dist[v] > j + 1:
                     dist[v] = j + 1
         reach.append(nxt)
+        
         frontier = nxt
         if not frontier:
             reach.extend(set() for _ in range(horizon - 1 - j))
@@ -130,10 +100,11 @@ def safe_bfs(start, blocked, lethal, horizon=HORIZON):
     return reach, dist
 
 
-def precompute(game_state):
-    """One danger map and one BFS per step, reused by all six actions."""
+def precompute(game_state,lethal=None):
+   #One danger map and one BFS per step, reused by all six actions.
     _, _, _, pos = game_state['self']
-    lethal = danger_map(game_state)
+    if lethal is None:
+        lethal = danger_map(game_state)
     blocked = blocked_map(game_state)
     reach, dist = safe_bfs(pos, blocked, lethal)
     return {
@@ -147,7 +118,7 @@ def precompute(game_state):
 
 
 def multi_source_bfs(sources, blocked):
-    """Distance from every tile to the nearest source, ignoring time."""
+#Distance from every tile to the nearest source, ignoring time.
     dist = np.full(blocked.shape, UNREACHABLE, dtype=np.int32)
     q = deque()
     for s in sources:
@@ -168,7 +139,7 @@ def multi_source_bfs(sources, blocked):
 
 
 def _dilate(mask):
-    """OR of a boolean board with its four neighbours ('reachable in one move')."""
+#OR of a boolean board with its four neighbours ('reachable in one move').
     out = mask.copy()
     out[:-1, :] |= mask[1:, :]
     out[1:, :] |= mask[:-1, :]
@@ -178,7 +149,7 @@ def _dilate(mask):
 
 
 def survivable_map(lethal, free):
-    """surv[j, x, y]: from (x, y) at end of step j, does ANY move sequence survive?"""
+    #surv[j, x, y]: from (x, y) at end of step j, does ANY move sequence survive?
     h = lethal.shape[0]
     surv = np.zeros_like(lethal)
     surv[h - 1] = free & ~lethal[h - 1]
@@ -188,7 +159,7 @@ def survivable_map(lethal, free):
 
 
 def _shift(a, dx, dy):
-    """a shifted so that out[v] == a[v + (dx, dy)], zero-filled at the border."""
+    #a shifted so that out[v] == a[v + (dx, dy)], zero-filled at the border.
     out = np.zeros_like(a)
     xs = slice(max(0, -dx), a.shape[0] - max(0, dx))
     xd = slice(max(0, dx), a.shape[0] - max(0, -dx))
@@ -199,7 +170,7 @@ def _shift(a, dx, dy):
 
 
 def bomb_values(field, power=BOMB_POWER):
-    """Crates destroyed by a bomb dropped on each tile, vectorised."""
+    #Crates destroyed by a bomb dropped on each tile.
     crate = field == 1
     wall = field == -1
     vals = np.zeros(field.shape, dtype=np.int32)
@@ -211,9 +182,8 @@ def bomb_values(field, power=BOMB_POWER):
     return vals
 
 
-# d_coin, d_crate and d_safety are RETIRED: computed as identically zero, kept in
-# place because weights.npz is indexed by POSITION. Renumbering silently
-# reassigns every learned weight after index 3. Do not delete them.
+#DO NOT DELETE THEM! because weights.npz is indexed by POSITION. Renumbering silently
+# reassigns every learned weight after index 3.
 FEATURE_NAMES = [
     'bias',
     'is_wait',
@@ -267,15 +237,16 @@ N_FEATURES = len(FEATURE_NAMES)
 W_HUNT = 0.25
 W_CRATE = 0.15
 
-
-def _danger_view(game_state, extra_bomb=None):
-    """lethal / survivable / distance-to-safety, optionally with a hypothetical bomb."""
+def _danger_view(game_state, extra_bomb=None,lethal=None):
+    #lethal or survivable  or distance-to-safety, optionally with a hypothetical bomb.
     gs = game_state
     if extra_bomb is not None:
         gs = dict(game_state)
         gs['bombs'] = list(game_state['bombs']) + [(extra_bomb, BOMB_TIMER)]
+    
+    if lethal is None:
+        lethal = danger_map(gs)
 
-    lethal = danger_map(gs)
     free = gs['field'] == 0
     for _, _, _, (ox, oy) in gs['others']:
         free[ox, oy] = False
@@ -284,12 +255,11 @@ def _danger_view(game_state, extra_bomb=None):
     d_safe = multi_source_bfs(list(zip(*np.nonzero(never_lethal))), ~free)
     return {'lethal': lethal, 'surv': surv, 'd_safe': d_safe}
 
-
 _CACHE = {}
 
 
 def _fingerprint(gs):
-    """Everything context() depends on - deliberately NOT the step counter."""
+#Everything context() depends on - deliberately NOT the step counter.
     _, _, bombs_left, pos = gs['self']
     return (pos, bombs_left,
             tuple(gs['bombs']), tuple(sorted(gs['coins'])),
@@ -298,7 +268,7 @@ def _fingerprint(gs):
 
 
 def context(game_state):
-    """Two danger views and several distance maps, shared by all six actions."""
+#Two danger views and several distance maps, shared by all six actions.
     key = _fingerprint(game_state)
     hit = _CACHE.get(key)
     if hit is not None:
@@ -313,11 +283,13 @@ def context(game_state):
 
 def _context_uncached(game_state):
     _, _, bombs_left, pos = game_state['self']
-    ctx = precompute(game_state)
+
+    lethal_now = danger_map(game_state)
+    ctx = precompute(game_state, lethal=lethal_now)
     ctx['bombs_left'] = bool(bombs_left)
     ctx['field'] = game_state['field']
 
-    ctx['now'] = _danger_view(game_state)
+    ctx['now'] = _danger_view(game_state, lethal=lethal_now)
     ctx['after_bomb'] = _danger_view(game_state, extra_bomb=pos) if bombs_left else ctx['now']
 
     ctx['d_to_coin'] = multi_source_bfs(game_state['coins'], ctx['blocked'])
@@ -353,7 +325,7 @@ def _context_uncached(game_state):
 
 
 def afterstate(pos, action, blocked, bombs_left):
-    """Where we stand after the action, and whether the action was legal."""
+# Where we stand after the action and whether if the action was legal.
     if action in MOVES:
         dx, dy = MOVES[action]
         v = (pos[0] + dx, pos[1] + dy)
@@ -462,7 +434,7 @@ def feature_matrix(game_state, ctx=None):
 
 
 def potential(game_state, ctx=None):
-    """Phi(s) for potential-based shaping - a function of the STATE only."""
+    #Phi(s) are for potential-based shaping function of the STATE only.
     if game_state is None:
         return 0.0
     if ctx is None:
