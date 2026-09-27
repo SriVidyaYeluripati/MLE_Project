@@ -1,7 +1,7 @@
 """
-Model A - callbacks.py  (the part that PLAYS)
+ForestQ - callbacks.py  (the part that PLAYS)
 
-Model A is Q-learning with one regressor per action (fitted Q-iteration).
+ForestQ is Q-learning with one regressor per action (fitted Q-iteration).
 It uses lecture techniques - regression forests / ridge regression - rather
 than a neural network, which satisfies the project's "lecture techniques"
 requirement and acts as our always-submittable fallback.
@@ -19,7 +19,7 @@ MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forestq.p
 # episode, and an episode that ends early stops producing data - so uniform
 # exploration systematically collects less experience per unit of wall clock,
 # and biases what it does collect toward the consequences of careless bombs.
-# That reasoning fits an agent that bombs too much.  Model A bombs too LITTLE
+# That reasoning fits an agent that bombs too much.  ForestQ bombs too LITTLE
 # (0.22 per round), so it needs bomb experience, not less of it: equal share.
 EXPLORE_P = np.array([1., 1., 1., 1., 1., 1.0])
 EXPLORE_P = EXPLORE_P / EXPLORE_P.sum()
@@ -32,7 +32,7 @@ def setup(self):
         with open(MODEL_FILE, "rb") as f:
             self.model = pickle.load(f)
         _make_prediction_fast(self.model)
-        self.logger.info("Loaded Model A from disk.")
+        self.logger.info("Loaded ForestQ from disk.")
     else:
         self.model = None          # untrained -> Q = 0 for every action
         self.logger.info("No saved model found, starting from scratch.")

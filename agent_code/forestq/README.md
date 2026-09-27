@@ -21,7 +21,7 @@ just this one.
 - `features.py`   the 28-feature contract
 - `callbacks.py`  play: the six regressors score the six actions, best one wins
 - `train.py`      fitted Q-iteration with symmetry augmentation
-- `forestq.pt`    trained model, six forests, pickled with scikit-learn 1.9.0
+- `forestq.pt`    trained model, six forests, pickled with scikit-learn 1.8.0
 
 ## Install
 
