@@ -1,7 +1,3 @@
-"""
-Always loaded, including in the tournament.   Keep this file fast and free of
-any training-only imports: train.py does not exist at tournament time.
-"""
 
 import os
 
@@ -19,13 +15,11 @@ TIE_EPS = 1e-9
 
 BOMB_EXPLORE = 0.25
 
-
 def model_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), MODEL_FILE)
 
-
 def setup(self):
-    """Called once before the first round."""
+    #Called once before the first round.
     path = model_path()
     self.rng = np.random.default_rng()
 
@@ -60,12 +54,13 @@ def setup(self):
 
 
 def legal_mask(phi):
-    """Rows of a feature matrix whose action the framework will actually run."""
+#legal actions are marked with 1 in the IS_INVALID column of the feature matrix.
     return phi[:, IS_INVALID] < 0.5
 
 
 def action_probabilities(q, tau, legal=None):
-    """Softmax over the legal actions, divided by their spread so tau is scale free."""
+#we are using a softmax function to convert Q-values into action probabilities. 
+
     q = np.asarray(q, dtype=float)
     if legal is None:
         legal = np.ones(len(q), dtype=bool)
@@ -76,7 +71,8 @@ def action_probabilities(q, tau, legal=None):
 
     q_legal = q[legal]
     p = np.zeros(len(q))
-
+    #The temperature tau controls the exploration-exploitation trade-off.
+    # so if tau is 0, we choose the action with the highest Q-value among legal actions.
     if tau <= 0:
         p[legal & (q >= q_legal.max() - TIE_EPS)] = 1.0
         return p / p.sum()
@@ -91,6 +87,7 @@ def action_probabilities(q, tau, legal=None):
 
 
 def act(self, game_state: dict) -> str:
+# Obviously , here we are using the learned Q-values to select an action based on the current game state. 
     ctx = context(game_state)
     phi = feature_matrix(game_state, ctx)
     q = phi @ self.w

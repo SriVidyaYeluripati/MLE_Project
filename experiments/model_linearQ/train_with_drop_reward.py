@@ -1,0 +1,180 @@
+"""Training file with the crate reward paid when the bomb is dropped."""
+import csv
+import os
+from collections import defaultdict
+from typing import List
+
+import numpy as np
+
+import events as e
+
+from .callbacks import action_probabilities, legal_mask, model_path
+from .features import (ACTIONS, N_FEATURES, FEATURE_NAMES, feature_matrix,
+                       features, potential, describe)
+
+GAMMA = 0.95
+LAMBDA = 0.80
+ALPHA = 0.01
+AVG_BETA = 0.001
+REPORT_EVERY = 100
+HISTORY_CSV = os.environ.get('LQ_HISTORY', '')
+REWARDS_TRUE = {
+    e.COIN_COLLECTED: 0.2,
+    e.KILLED_OPPONENT: 1.0,
+}
+REWARDS_EXTRA = {
+    e.KILLED_SELF: -1.0,
+    e.GOT_KILLED: -1.0,
+    e.CRATE_DESTROYED: 0.02,
+    e.INVALID_ACTION: -0.05,
+}
+
+
+DROP_REWARD = os.environ.get('LQ_DROP_REWARD', '0') != '0'
+if DROP_REWARD:
+    REWARDS_EXTRA[e.CRATE_DESTROYED] = 0.0
+
+
+def setup_training(self):
+    self.trace = np.zeros(N_FEATURES)
+    self.w_avg = self.w.copy()
+    self.round = 0
+    self.stats = defaultdict(float)
+    self.history = []
+    self.q_max_seen = 0.0
+    self.processed_step = -1
+    self.logger.info(f'training: gamma={GAMMA} lambda={LAMBDA} alpha={ALPHA}')
+
+
+def reward_from(self, events, old_state, new_state, old_ctx=None):
+    #adding potential-based shaping to the true reward.
+    r = sum(REWARDS_TRUE.get(ev, 0.0) for ev in events)
+    self.stats['true_return'] += r
+    r += sum(REWARDS_EXTRA.get(ev, 0.0) for ev in events)
+
+    if DROP_REWARD and e.BOMB_DROPPED in events and old_ctx is not None:
+        x, y = old_state['self'][3]
+        r += 0.02 * int(old_ctx['bomb_value'][x, y])
+
+    r += GAMMA * potential(new_state) - potential(old_state, old_ctx)
+    return r
+
+
+def update(self, phi_sa, q_next, r, terminal, legal_next=None):
+    #One Expected SARSA(lambda) step.
+    q_sa = float(phi_sa @ self.w)
+
+    if terminal:
+        target = r
+    else:
+        p = action_probabilities(q_next, self.tau, legal_next)
+        target = r + GAMMA * float(p @ q_next)
+
+    delta = target - q_sa
+
+    self.trace = GAMMA * LAMBDA * self.trace + phi_sa
+    alpha = ALPHA / max(float(phi_sa @ phi_sa), 1.0)
+    self.w += alpha * delta * self.trace
+    self.w_avg += AVG_BETA * (self.w - self.w_avg)
+
+    self.stats['td_abs'] += abs(delta)
+    self.stats['updates'] += 1
+    self.q_max_seen = max(self.q_max_seen, abs(q_sa))
+
+
+def game_events_occurred(self, old_game_state: dict, self_action: str,
+                         new_game_state: dict, events: List[str]):
+    #MainPart of the learning happens here.
+    if old_game_state is None or self_action is None:
+        return
+
+    a = ACTIONS.index(self_action) if self_action in ACTIONS else None
+    if a is None:
+        return
+
+    old_ctx = getattr(self, 'last_ctx', None)
+    phi_sa = (self.last_phi[a] if getattr(self, 'last_phi', None) is not None
+              else features(old_game_state, self_action))
+    phi_next = feature_matrix(new_game_state)
+    q_next = phi_next @ self.w
+
+    r = reward_from(self, events, old_game_state, new_game_state, old_ctx)
+    update(self, phi_sa, q_next, r, terminal=False,
+           legal_next=legal_mask(phi_next))
+
+    for ev in events:
+        self.stats[ev] += 1
+    self.processed_step = old_game_state['step']
+
+
+def end_of_round(self, last_game_state: dict, last_action: str, events: List[str]):
+    
+    already_seen = (last_game_state is not None
+                    and last_game_state['step'] == self.processed_step)
+    # processed_step is the last step we have already processed
+
+    if not already_seen and last_action in ACTIONS:
+        a = ACTIONS.index(last_action)
+        phi_sa = (self.last_phi[a] if getattr(self, 'last_phi', None) is not None
+                  else features(last_game_state, last_action))
+        r = reward_from(self, events, last_game_state, None,
+                        getattr(self, 'last_ctx', None))
+        update(self, phi_sa, None, r, terminal=True)
+    
+    for ev in events:
+        if not already_seen or ev == e.SURVIVED_ROUND:
+            self.stats[ev] += 1
+
+    self.trace[:] = 0.0
+    self.last_phi = self.last_q = self.last_ctx = None
+    self.processed_step = -1
+    self.round += 1
+
+    self.stats['score'] = (1.0 * self.stats[e.COIN_COLLECTED]
+                           + 5.0 * self.stats[e.KILLED_OPPONENT])
+    self.stats['steps'] += last_game_state['step']
+
+    if self.round % REPORT_EVERY == 0:
+        n = REPORT_EVERY
+        row = {
+            'round': self.round,
+            'score': self.stats['score'] / n,
+            'coins': self.stats[e.COIN_COLLECTED] / n,
+            'crates': self.stats[e.CRATE_DESTROYED] / n,
+            'bombs': self.stats[e.BOMB_DROPPED] / n,
+            'suicides': self.stats[e.KILLED_SELF] / n,
+            'survived': self.stats[e.SURVIVED_ROUND] / n,
+            'invalid': self.stats[e.INVALID_ACTION] / n,
+            'steps': self.stats['steps'] / n,
+            'td_abs': self.stats['td_abs'] / max(self.stats['updates'], 1),
+            'w_norm': float(np.linalg.norm(self.w)),
+            'max_abs_q': self.q_max_seen,
+        }
+        self.history.append(row)
+        if HISTORY_CSV:
+            new = not os.path.exists(HISTORY_CSV)
+            os.makedirs(os.path.dirname(HISTORY_CSV) or '.', exist_ok=True)
+            with open(HISTORY_CSV, 'a', newline='') as fh:
+                wr = csv.DictWriter(fh, fieldnames=list(row))
+                if new:
+                    wr.writeheader()
+                wr.writerow(row)
+        self.logger.info(str(row))
+        print(f"[{self.round:5d}]  score {row['score']:5.2f}  coins {row['coins']:5.2f}"
+              f"  crates {row['crates']:5.2f}  bombs {row['bombs']:5.2f}"
+              f"  suicide {row['suicides']:4.2f}  surv {row['survived']:4.2f}"
+              f"  |w| {row['w_norm']:5.2f}  max|Q| {row['max_abs_q']:5.2f}")
+        print('          ' + describe(self.w, top=8))
+        self.stats = defaultdict(float)
+        self.q_max_seen = 0.0
+
+    save(self)
+
+
+def save(self):
+    np.savez(model_path(),
+             w=self.w_avg,
+             w_last=self.w,
+             feature_names=np.array(FEATURE_NAMES),
+             actions=np.array(ACTIONS),
+             hyper=np.array([GAMMA, LAMBDA, ALPHA, 1.0]))

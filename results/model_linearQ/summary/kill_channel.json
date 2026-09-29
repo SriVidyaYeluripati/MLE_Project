@@ -1,0 +1,104 @@
+{
+  "agent": "model_linearQ",
+  "model": "Model LinQ (linear Q, Expected SARSA(lambda))",
+  "id": "kill_channel",
+  "title": "opp_trapped: a feature that never worked (exploratory)",
+  "section": "build log 13",
+  "question": "Does repairing opp_trapped, which has always been an exact copy of opp_in_blast, raise kills?",
+  "preregistration": "experiments/model_linq/PREREG_trapped.md",
+  "design": {
+    "arms": [
+      "broken (shipped)",
+      "fixed"
+    ],
+    "n": 6,
+    "paired": true,
+    "primary_metric": "kills"
+  },
+  "raw_runs": "results/model_linq/trapped/",
+  "defect": {
+    "bombs_covering_opponent_broken": 443,
+    "claimed_trapping_broken": 443,
+    "pct_broken": 100,
+    "bombs_covering_opponent_fixed": 502,
+    "claimed_trapping_fixed": 23,
+    "pct_fixed": 5,
+    "note": "the survivability map it queried had opponents removed from the walkable set, so the answer at an opponent tile was always \"cannot escape\""
+  },
+  "runs": [
+    {
+      "seed": 3001,
+      "kills_base": 0.137,
+      "kills_fix": 0.157,
+      "score_base": 2.67,
+      "score_fix": 3.04,
+      "coins_base": 1.99,
+      "coins_fix": 2.26
+    },
+    {
+      "seed": 3002,
+      "kills_base": 0.237,
+      "kills_fix": 0.253,
+      "score_base": 3.5,
+      "score_fix": 3.62,
+      "coins_base": 2.31,
+      "coins_fix": 2.35
+    },
+    {
+      "seed": 3003,
+      "kills_base": 0.13,
+      "kills_fix": 0.297,
+      "score_base": 2.15,
+      "score_fix": 3.69,
+      "coins_base": 1.5,
+      "coins_fix": 2.21
+    },
+    {
+      "seed": 3004,
+      "kills_base": 0.15,
+      "kills_fix": 0.14,
+      "score_base": 2.43,
+      "score_fix": 2.81,
+      "coins_base": 1.68,
+      "coins_fix": 2.11
+    },
+    {
+      "seed": 3005,
+      "kills_base": 0.13,
+      "kills_fix": 0.133,
+      "score_base": 2.75,
+      "score_fix": 2.74,
+      "coins_base": 2.1,
+      "coins_fix": 2.07
+    },
+    {
+      "seed": 3006,
+      "kills_base": 0.18,
+      "kills_fix": 0.167,
+      "score_base": 2.57,
+      "score_fix": 3.05,
+      "coins_base": 1.67,
+      "coins_fix": 2.22
+    }
+  ],
+  "paired_tests": [
+    {
+      "metric": "kills",
+      "primary": true,
+      "mean": 0.031,
+      "better_in": "4/6",
+      "t": 1.1
+    },
+    {
+      "metric": "coins",
+      "primary": false,
+      "mean": 0.328,
+      "sd": 0.291,
+      "better_in": "5/6",
+      "t": 2.76,
+      "note": "secondary; promoted to a confirmatory test, which it failed"
+    }
+  ],
+  "verdict": "primary null, secondary sent to confirmation",
+  "conclusion": "All four kill weights sat at exactly +0.0427 because the learner cannot split credit between columns it cannot distinguish. Identical weights are a free diagnostic that a deep network does not offer."
+}

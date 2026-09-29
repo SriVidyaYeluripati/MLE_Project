@@ -1,0 +1,148 @@
+{
+  "agent": "model_linearQ",
+  "model": "Model LinQ (linear Q, Expected SARSA(lambda))",
+  "id": "kill_channel_confirmatory",
+  "title": "Confirmatory: the coins effect does not replicate",
+  "section": "build log 14",
+  "question": "Does the +0.328 coins effect from the exploratory run survive a pre-registered test?",
+  "preregistration": "experiments/model_linq/PREREG_trapped_confirm.md",
+  "design": {
+    "arms": [
+      "broken (shipped)",
+      "fixed"
+    ],
+    "n": 10,
+    "paired": true,
+    "primary_metric": "coins",
+    "fresh_seeds": true,
+    "primary_fixed_in_advance": true
+  },
+  "raw_runs": "results/model_linq/trapc/",
+  "runs": [
+    {
+      "seed": 4001,
+      "kills_base": 0.17,
+      "kills_fix": 0.223,
+      "score_base": 2.55,
+      "score_fix": 3.33,
+      "coins_base": 1.7,
+      "coins_fix": 2.22
+    },
+    {
+      "seed": 4002,
+      "kills_base": 0.11,
+      "kills_fix": 0.16,
+      "score_base": 2.42,
+      "score_fix": 3.24,
+      "coins_base": 1.87,
+      "coins_fix": 2.44
+    },
+    {
+      "seed": 4003,
+      "kills_base": 0.097,
+      "kills_fix": 0.177,
+      "score_base": 1.08,
+      "score_fix": 3.35,
+      "coins_base": 0.6,
+      "coins_fix": 2.47
+    },
+    {
+      "seed": 4004,
+      "kills_base": 0.09,
+      "kills_fix": 0.137,
+      "score_base": 2.39,
+      "score_fix": 2.25,
+      "coins_base": 1.94,
+      "coins_fix": 1.57
+    },
+    {
+      "seed": 4005,
+      "kills_base": 0.153,
+      "kills_fix": 0.107,
+      "score_base": 2.99,
+      "score_fix": 2.11,
+      "coins_base": 2.22,
+      "coins_fix": 1.58
+    },
+    {
+      "seed": 4006,
+      "kills_base": 0.157,
+      "kills_fix": 0.083,
+      "score_base": 3.0,
+      "score_fix": 2.07,
+      "coins_base": 2.21,
+      "coins_fix": 1.66
+    },
+    {
+      "seed": 4007,
+      "kills_base": 0.29,
+      "kills_fix": 0.167,
+      "score_base": 3.25,
+      "score_fix": 3.09,
+      "coins_base": 1.8,
+      "coins_fix": 2.26
+    },
+    {
+      "seed": 4008,
+      "kills_base": 0.13,
+      "kills_fix": 0.133,
+      "score_base": 2.52,
+      "score_fix": 2.61,
+      "coins_base": 1.87,
+      "coins_fix": 1.95
+    },
+    {
+      "seed": 4009,
+      "kills_base": 0.133,
+      "kills_fix": 0.13,
+      "score_base": 2.64,
+      "score_fix": 2.26,
+      "coins_base": 1.97,
+      "coins_fix": 1.61
+    },
+    {
+      "seed": 4010,
+      "kills_base": 0.32,
+      "kills_fix": 0.133,
+      "score_base": 3.7,
+      "score_fix": 2.79,
+      "coins_base": 2.1,
+      "coins_fix": 2.12
+    }
+  ],
+  "paired_tests": [
+    {
+      "metric": "coins",
+      "primary": true,
+      "mean": 0.16,
+      "sd": 0.748,
+      "better_in": "6/10",
+      "t": 0.68,
+      "ci": [
+        -0.375,
+        0.695
+      ]
+    },
+    {
+      "metric": "kills",
+      "primary": false,
+      "mean": -0.02,
+      "sd": 0.087,
+      "better_in": "5/10",
+      "t": -0.73,
+      "ci": [
+        -0.082,
+        0.042
+      ]
+    }
+  ],
+  "verdict": "null - exploratory effect withdrawn",
+  "power_note": {
+    "prereg_promised_power": 0.95,
+    "prereg_assumed_sd": 0.291,
+    "true_sd": 0.748,
+    "true_power": 0.36,
+    "lesson": "never power a confirmatory study on the variance estimate from the exploratory run that motivated it - the winner's curse inflates the effect and deflates the spread at the same time"
+  },
+  "conclusion": "The effect halved and the sd was wrong by 2.6x. Sixteen trainings across two pre-registered experiments retired a plausible finding before it reached the report."
+}

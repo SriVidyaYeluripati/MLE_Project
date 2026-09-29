@@ -1,0 +1,63 @@
+{
+  "agent": "model_linearQ",
+  "model": "Model LinQ (linear Q, Expected SARSA(lambda))",
+  "id": "herding",
+  "title": "Herding: can the agent be made to create trap geometry?",
+  "section": "build log 14",
+  "question": "Kills are capped by opportunity. Can a movement-row feature make the agent create traps?",
+  "preregistration": "experiments/model_linq/PREREG_herding.md",
+  "design": {
+    "arms": [
+      "baseline",
+      "+opp_confine"
+    ],
+    "n": 40,
+    "paired": true,
+    "primary_metric": "kills",
+    "one_sided": true,
+    "target_effect": 0.04,
+    "detectable_at_80pct_power": 0.018,
+    "pre_checks": "verified non-redundant and carrying a real gradient before training"
+  },
+  "raw_runs": "results/model_linq/herd/",
+  "paired_tests": [
+    {
+      "metric": "kills",
+      "primary": true,
+      "mean": -0.003,
+      "sd": 0.041,
+      "better_in": "15/40",
+      "t": -0.39,
+      "ci": [
+        -0.016,
+        0.01
+      ]
+    },
+    {
+      "metric": "coins",
+      "primary": false,
+      "mean": 0.18,
+      "sd": 0.618,
+      "better_in": "23/40",
+      "t": 1.84,
+      "ci": [
+        -0.018,
+        0.377
+      ]
+    },
+    {
+      "metric": "score",
+      "primary": false,
+      "mean": 0.167,
+      "sd": 0.731,
+      "better_in": "22/40",
+      "t": 1.44,
+      "ci": [
+        -0.067,
+        0.4
+      ]
+    }
+  ],
+  "verdict": "bounded null",
+  "conclusion": "The one null in the project tight enough to close a question. At n=40 the test could have seen an effect 2.2x smaller than the one worth having; the kills CI is 0.026 wide. \"We found nothing\" and \"there is nothing to find\" are different claims, and only a powered design earns the second."
+}

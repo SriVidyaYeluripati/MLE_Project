@@ -1,0 +1,85 @@
+{
+    "by_agent": {
+        "model_gbt": {
+            "bombs": 51,
+            "coins": 1,
+            "crates": 37,
+            "invalid": 169,
+            "moves": 130,
+            "rounds": 5,
+            "score": 1,
+            "steps": 363,
+            "suicides": 5,
+            "time": 0.25526881217956543
+        },
+        "model_linearQ": {
+            "bombs": 212,
+            "coins": 17,
+            "crates": 154,
+            "invalid": 1,
+            "kills": 1,
+            "moves": 1096,
+            "rounds": 5,
+            "score": 22,
+            "steps": 1708,
+            "suicides": 1,
+            "time": 2.4348995685577393
+        },
+        "my_agent": {
+            "bombs": 113,
+            "coins": 10,
+            "crates": 208,
+            "invalid": 2,
+            "moves": 1541,
+            "rounds": 5,
+            "score": 10,
+            "steps": 1669,
+            "suicides": 1,
+            "time": 2.3874144554138184
+        },
+        "rule_based_agent": {
+            "bombs": 81,
+            "coins": 15,
+            "crates": 204,
+            "invalid": 15,
+            "moves": 1141,
+            "rounds": 5,
+            "score": 15,
+            "steps": 1245,
+            "suicides": 2,
+            "time": 0.4962031841278076
+        }
+    },
+    "by_round": {
+        "Round 01 (2026-09-20 22-36-30)": {
+            "coins": 9,
+            "kills": 0,
+            "steps": 400,
+            "suicides": 2
+        },
+        "Round 02 (2026-09-20 22-36-31)": {
+            "coins": 9,
+            "kills": 0,
+            "steps": 400,
+            "suicides": 3
+        },
+        "Round 03 (2026-09-20 22-36-32)": {
+            "coins": 9,
+            "kills": 0,
+            "steps": 400,
+            "suicides": 1
+        },
+        "Round 04 (2026-09-20 22-36-33)": {
+            "coins": 8,
+            "kills": 0,
+            "steps": 400,
+            "suicides": 2
+        },
+        "Round 05 (2026-09-20 22-36-35)": {
+            "coins": 8,
+            "kills": 1,
+            "steps": 400,
+            "suicides": 1
+        }
+    }
+}

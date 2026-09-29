@@ -1,0 +1,36 @@
+{
+    "by_agent": {
+        "model_gbt": {
+            "bombs": 116,
+            "coins": 1,
+            "crates": 16,
+            "invalid": 458,
+            "moves": 238,
+            "rounds": 3,
+            "score": 1,
+            "steps": 815,
+            "suicides": 1,
+            "time": 0.5774829387664795
+        }
+    },
+    "by_round": {
+        "Round 01 (2026-09-20 22-36-09)": {
+            "coins": 0,
+            "kills": 0,
+            "steps": 400,
+            "suicides": 0
+        },
+        "Round 02 (2026-09-20 22-36-09)": {
+            "coins": 1,
+            "kills": 0,
+            "steps": 15,
+            "suicides": 1
+        },
+        "Round 03 (2026-09-20 22-36-09)": {
+            "coins": 0,
+            "kills": 0,
+            "steps": 400,
+            "suicides": 0
+        }
+    }
+}

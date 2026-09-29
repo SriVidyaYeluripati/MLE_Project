@@ -1,0 +1,57 @@
+{
+  "agent": "model_linearQ",
+  "model": "Model LinQ (linear Q, Expected SARSA(lambda))",
+  "id": "bc_ceiling",
+  "title": "The ceiling diagnostic: are the features or the learner the constraint?",
+  "section": "run output (post-dates the build log)",
+  "source_note": "Numbers from tools/model_linq/bc_probe.py and tools/model_linq/dagger.py. Raw runs in results/model_linq/dagger/.",
+  "question": "Every intervention has been a null. Is the binding constraint the feature set, the linear function class, or the RL algorithm?",
+  "design": {
+    "method": "behavioural cloning of rule_based_agent onto LinQ's exact functional form (conditional logit on the action scores), then DAgger",
+    "why": "if the best possible model on these features cannot imitate rule_based, no weight vector on these features plays like rule_based, and the features are the ceiling"
+  },
+  "raw_runs": "results/model_linq/dagger/",
+  "agreement_with_rule_based": [
+    {
+      "model": "shipped LinQ weights",
+      "pct": 40.6
+    },
+    {
+      "model": "best linear model on the same features",
+      "pct": 79.7
+    },
+    {
+      "model": "best linear model + 128 random tanh features",
+      "pct": 79.8
+    }
+  ],
+  "play_performance": [
+    {
+      "model": "shipped LinQ (RL)",
+      "score": 3.16
+    },
+    {
+      "model": "behavioural clone",
+      "score": 2.15
+    },
+    {
+      "model": "DAgger round 1",
+      "score": 2.08
+    },
+    {
+      "model": "DAgger round 2",
+      "score": 1.21
+    },
+    {
+      "model": "DAgger round 3",
+      "score": 0.58
+    },
+    {
+      "model": "DAgger round 4",
+      "score": 0.58
+    }
+  ],
+  "dagger_accuracy_final": 74.5,
+  "verdict": "the features are the ceiling",
+  "conclusion": "The best possible linear model on these 36 features agrees with rule_based only 79.7% of the time, and adding 128 non-linear features buys 0.1 points of that - so the remaining 20% is not learnable from these numbers, because the same feature vector maps to different rule_based actions. The clone also plays worse than the RL agent (2.15 vs 3.16), which means the RL already extracts more from these features than imitation does. This retired the pre-registered random-feature experiment before it was run."
+}

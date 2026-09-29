@@ -1,16 +1,5 @@
-"""
-Imported only when training.   Expected SARSA(lambda) with linear features.
-
-Why Expected SARSA rather than Q-learning: its target contains no max, so it
-carries no maximisation bias at all, and it is on-policy, which is the family
-that does not diverge the way Q-learning with linear function approximation can.
-Both properties come free here, because act() has already computed all the
-action values we need.
-"""
 import csv
 import os
-from collections import defaultdict
-from typing import List
 from collections import defaultdict
 from typing import List
 
@@ -25,8 +14,6 @@ from .features import (ACTIONS, N_FEATURES, FEATURE_NAMES, feature_matrix,
 GAMMA = 0.95
 LAMBDA = 0.80
 ALPHA = 0.01
-AVG_BETA = 0.001
-REPORT_EVERY = 100
 AVG_BETA = 0.001
 REPORT_EVERY = 100
 HISTORY_CSV = os.environ.get('LQ_HISTORY', '')
@@ -54,7 +41,7 @@ def setup_training(self):
 
 
 def reward_from(self, events, old_state, new_state, old_ctx=None):
-    """tier 1 + tier 2 (potential-based) + tier 3."""
+    #adding potential-based shaping to the true reward.
     r = sum(REWARDS_TRUE.get(ev, 0.0) for ev in events)
     self.stats['true_return'] += r
     r += sum(REWARDS_EXTRA.get(ev, 0.0) for ev in events)
@@ -64,7 +51,7 @@ def reward_from(self, events, old_state, new_state, old_ctx=None):
 
 
 def update(self, phi_sa, q_next, r, terminal, legal_next=None):
-    """One Expected SARSA(lambda) step."""
+    #One Expected SARSA(lambda) step.
     q_sa = float(phi_sa @ self.w)
 
     if terminal:
@@ -87,6 +74,7 @@ def update(self, phi_sa, q_next, r, terminal, legal_next=None):
 
 def game_events_occurred(self, old_game_state: dict, self_action: str,
                          new_game_state: dict, events: List[str]):
+    #MainPart of the learning happens here.
     if old_game_state is None or self_action is None:
         return
 
@@ -110,11 +98,10 @@ def game_events_occurred(self, old_game_state: dict, self_action: str,
 
 
 def end_of_round(self, last_game_state: dict, last_action: str, events: List[str]):
-    """Final update. Death is terminal; surviving to the step limit is not, and was
-    already delivered to game_events_occurred - self.processed_step tells them apart,
-    so the same transition is not applied twice."""
+    
     already_seen = (last_game_state is not None
                     and last_game_state['step'] == self.processed_step)
+    # processed_step is the last step we have already processed
 
     if not already_seen and last_action in ACTIONS:
         a = ACTIONS.index(last_action)
@@ -123,7 +110,7 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: List[str
         r = reward_from(self, events, last_game_state, None,
                         getattr(self, 'last_ctx', None))
         update(self, phi_sa, None, r, terminal=True)
-
+    
     for ev in events:
         if not already_seen or ev == e.SURVIVED_ROUND:
             self.stats[ev] += 1
